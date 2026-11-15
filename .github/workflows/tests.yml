@@ -1,0 +1,38 @@
+name: Validate snow_analysis
+on:
+  push:
+    branches:
+      - feature/shareable-research-sessions
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+      - name: Compile Python
+        run: python -m compileall -q app.py gee_client.py geo_utils.py google_terrain.py map_builder.py map_component.py session_store.py tests
+      - name: Unit tests
+        run: python -m pytest tests -q
+      - name: Validate map JavaScript
+        run: |
+          python - <<'PY'
+          import re, pathlib
+          p=pathlib.Path('map_component/index.html')
+          s=p.read_text()
+          scripts=re.findall(r'<script(?:\s[^>]*)?>([\s\S]*?)</script>',s)
+          assert len(scripts)==1, len(scripts)
+          pathlib.Path('/tmp/snow_map.js').write_text(scripts[0])
+          PY
+          node --check /tmp/snow_map.js

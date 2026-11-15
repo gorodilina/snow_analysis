@@ -25,6 +25,17 @@ jobs:
         run: python -m compileall -q app.py gee_client.py geo_utils.py google_terrain.py map_builder.py map_component.py session_store.py tests
       - name: Unit tests
         run: python -m pytest tests -q
+      - name: Smoke-test Streamlit application
+        run: |
+          python - <<'PY'
+          from streamlit.testing.v1 import AppTest
+          app = AppTest.from_file("app.py", default_timeout=30).run()
+          if len(app.exception):
+              for error in app.exception:
+                  print(error.message)
+              raise AssertionError("Streamlit app raised exceptions")
+          print("AppTest passed without GEE/Supabase credentials")
+          PY
       - name: Validate map JavaScript
         run: |
           python - <<'PY'

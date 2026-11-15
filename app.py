@@ -1,36 +1,36 @@
-"""Streamlit frontend for snow conditions and satellite scene analysis."""
-
+"""Snow analysis UI: satellite scenes, median mosaics and shareable research sessions."""
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 
-from geo_utils import GeoInputError, read_geo, search_geometry
 from gee_client import (
-    EarthEngineUnavailable, SENTINEL, LANDSAT,
-    initialize_ee, list_month_scenes, count_interval_scenes, scene_image, median_images, build_tile_layers,
+    EarthEngineUnavailable, LANDSAT, SENTINEL, build_tile_layers,
+    initialize_ee, list_month_scenes, median_images, scene_image,
+    count_interval_scenes,
 )
-from map_builder import map_html
+from geo_utils import GeoInputError, read_geo, search_geometry
 from google_terrain import get_google_terrain
+from map_builder import map_config
+from map_component import research_map
+from session_store import SessionStorageError, SessionStore, valid_token
 
 ROOT = Path(__file__).resolve().parent
 MONTHS = {
-    1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель',
-    5: 'Май', 6: 'Июнь', 7: 'Июль', 8: 'Август',
-    9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь',
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь",
 }
-
-st.set_page_config(page_title='Анализ снежной обстановки', page_icon='🏔️', layout='wide')
-st.markdown('''<style>
+st.set_page_config(page_title="Анализ снежной обстановки", page_icon="🏔️", layout="wide")
+st.markdown("""<style>
 .block-container{padding-top:1.3rem;padding-bottom:1rem;max-width:none}
 [data-testid="stSidebar"]{min-width:335px}
-</style>''', unsafe_allow_html=True)
+</style>""", unsafe_allow_html=True)
 
 
 def setting(name: str, default=None):
@@ -43,9 +43,9 @@ def setting(name: str, default=None):
 
 
 @st.cache_resource(show_spinner=False)
-def connect_ee(project: str, serialized_service_account: str | None):
-    service_account = json.loads(serialized_service_account) if serialized_service_account else None
-    initialize_ee(project, service_account)
+def connect_ee(project: str, service_json: str | None):
+    credentials = json.loads(service_json) if service_json else None
+    initialize_ee(project, credentials)
     return True
 
 
@@ -54,107 +54,191 @@ def cached_scenes(satellite: str, bbox: tuple[float, ...], year: int, month: int
     return list_month_scenes(satellite, list(bbox), year, month)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_interval_count(satellite: str, bbox: tuple[float, ...], start: date, days: int):
+    return count_interval_scenes(satellite, list(bbox), start, days)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_google_terrain(api_key: str, bbox: tuple[float, ...]):
     return get_google_terrain(api_key, list(bbox))
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_interval_count(satellite: str, bbox: tuple[float, ...], first: date, length: int) -> int:
-    return count_interval_scenes(satellite, list(bbox), first, length)
-
-
-def load_uploaded(filename: str, data: bytes):
+def parse_upload(filename: str, data: bytes):
     try:
         return read_geo(filename, data)
     except GeoInputError as exc:
-        st.error(f'Ошибка файла «{filename}»: {exc}')
+        st.error(f"Ошибка файла «{filename}»: {exc}")
         return [], []
 
 
-with st.sidebar:
-    st.title('🏔️ Анализ снежной обстановки')
-    st.caption('Спутниковые снимки, граница снега и изотермы вдоль маршрута')
-    st.subheader('1. Трек и точки')
-    geo_uploads = st.file_uploader(
-        'Загрузить треки и точки (KML, GPX, CSV)',
-        type=['kml', 'gpx', 'csv'],
-        accept_multiple_files=True,
-        key='geo_files',
-        help='Можно выбрать сколько угодно файлов: все треки объединяются, '
-             'все точки добавляются. CSV используется для точек.',
-    )
-    st.caption('Можно выбрать несколько файлов одновременно. '
-               'Загруженные треки заменят демонстрационный трек; '
-               'исходные 28 точек сохраняются. '
-               'Точки и их подписи можно скрыть в «Слоях карты».')
+def apply_research_payload(payload: dict):
+    """Hydrate Streamlit widgets before they are instantiated."""
+    st.session_state["research_name"] = payload.get("name") or "Новое исследование"
+    st.session_state["saved_routes"] = payload.get("routes") or []
+    st.session_state["saved_points"] = payload.get("points") or []
+    st.session_state["notes"] = payload.get("notes") or []
+    st.session_state["manual_points"] = []
+    st.session_state["map_state"] = payload.get("map_state") or {}
+    st.session_state["selection"] = payload.get("selection")
+    st.session_state["tiles"] = []
+    st.session_state["image_caption"] = ""
+    st.session_state["warnings"] = []
+    st.session_state["pending_restore"] = bool(payload.get("selection"))
+    ui = payload.get("ui") or {}
+    for key in ["satellite", "mode", "year", "month", "median_length"]:
+        if key in ui:
+            st.session_state[key] = ui[key]
+    if ui.get("median_start"):
+        st.session_state["median_start"] = date.fromisoformat(ui["median_start"])
 
-    if 'manual_points' not in st.session_state:
-        st.session_state['manual_points'] = []
-    with st.expander('Добавить точку вручную'):
-        with st.form('point_form'):
-            point_name = st.text_input('Название', value='Новая точка')
-            col1, col2 = st.columns(2)
-            point_lat = col1.number_input('Широта', min_value=-90.0, max_value=90.0, value=42.35, format='%.6f')
-            point_lon = col2.number_input('Долгота', min_value=-180.0, max_value=180.0, value=46.25, format='%.6f')
-            submitted = st.form_submit_button('Добавить точку', use_container_width=True)
-            if submitted:
-                st.session_state['manual_points'].append({
-                    'name': point_name.strip() or 'Точка',
-                    'coordinates': [point_lon, point_lat],
+
+def research_payload(routes: list[dict], points: list[dict]) -> dict:
+    ui = {}
+    for key in ["satellite", "mode", "year", "month", "median_length"]:
+        if key in st.session_state:
+            ui[key] = st.session_state[key]
+    if "median_start" in st.session_state:
+        ui["median_start"] = st.session_state["median_start"].isoformat()
+    return {
+        "schema": 1,
+        "name": st.session_state.get("research_name", "Новое исследование"),
+        "routes": routes,
+        "points": points,
+        "notes": st.session_state.get("notes", []),
+        "ui": ui,
+        "selection": st.session_state.get("selection"),
+        "map_state": st.session_state.get("map_state", {}),
+    }
+
+
+def share_link(token: str) -> str:
+    try:
+        url = st.context.url
+    except (AttributeError, RuntimeError):
+        url = setting("APP_PUBLIC_URL", "")
+    return (url.rstrip("/") + "?session=" + token) if url else "?session=" + token
+
+
+# Persistent sessions: configured with server-side Supabase secrets.
+store = None
+if setting("SUPABASE_URL", "") and setting("SUPABASE_SECRET_KEY", ""):
+    try:
+        store = SessionStore(setting("SUPABASE_URL"), setting("SUPABASE_SECRET_KEY"))
+    except SessionStorageError as exc:
+        st.warning(f"Хранилище исследований: {exc}")
+
+requested_token = st.query_params.get("session", "")
+if requested_token and requested_token != st.session_state.get("active_token"):
+    if not valid_token(requested_token):
+        st.error("Некорректная ссылка на исследование.")
+    elif not store:
+        st.warning("Чтобы открыть сохранённую ссылку, подключите Supabase к приложению.")
+    else:
+        try:
+            saved = store.get(requested_token)
+            if saved is None:
+                st.error("Исследование по этой ссылке не найдено.")
+            else:
+                apply_research_payload(saved)
+                st.session_state["active_token"] = requested_token
+                st.session_state["last_saved_digest"] = hashlib.sha256(
+                    json.dumps(saved, ensure_ascii=False, sort_keys=True).encode()
+                ).hexdigest()
+                st.session_state["loaded_map_revision"] = requested_token
+        except (SessionStorageError, ValueError, TypeError) as exc:
+            st.error(f"Не удалось открыть исследование: {exc}")
+
+st.session_state.setdefault("research_name", "Новое исследование")
+st.session_state.setdefault("manual_points", [])
+st.session_state.setdefault("notes", [])
+st.session_state.setdefault("map_state", {})
+st.session_state.setdefault("selection", None)
+
+with st.sidebar:
+    st.title("🏔️ Анализ снежной обстановки")
+    st.caption("Спутниковые снимки, граница снега и изотермы вдоль трека")
+    st.subheader("1. Трек и точки")
+    uploads = st.file_uploader(
+        "Загрузить файлы KML или GPX",
+        type=["kml", "gpx", "csv"],
+        accept_multiple_files=True,
+        key="geo_files",
+        help="Выберите несколько файлов одновременно. CSV — для точек.",
+    )
+
+    with st.expander("Добавить точку вручную"):
+        with st.form("point_form", clear_on_submit=False):
+            point_name = st.text_input("Название", value="Новая точка")
+            col_lat, col_lon = st.columns(2)
+            point_lat = col_lat.number_input(
+                "Широта", min_value=-90., max_value=90., value=42.35, format="%.6f"
+            )
+            point_lon = col_lon.number_input(
+                "Долгота", min_value=-180., max_value=180., value=46.25, format="%.6f"
+            )
+            if st.form_submit_button("Добавить точку", use_container_width=True):
+                st.session_state["manual_points"].append({
+                    "name": point_name.strip() or "Точка",
+                    "coordinates": [point_lon, point_lat],
                 })
-        if st.button('Очистить добавленные вручную точки', use_container_width=True):
-            st.session_state['manual_points'] = []
+        if st.button("Очистить добавленные вручную точки", use_container_width=True):
+            st.session_state["manual_points"] = []
 
     st.divider()
-    st.subheader('2. Спутниковые снимки')
-    satellite = st.selectbox('Источник', [SENTINEL, LANDSAT], index=0)
-    mode = st.radio('Режим', ['Конкретный снимок', 'Медианная мозаика'], label_visibility='visible')
+    st.subheader("2. Спутниковые снимки")
+    satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
+    mode = st.radio("Режим", ["Конкретный снимок", "Медианная мозаика"], key="mode")
 
-# Load all uploaded KML/GPX files through ONE widget.
-# Files can contain routes, points, or both. CSV files add points.
 demo_routes, _ = read_geo(
-    'default_route.kml', (ROOT / 'data/default_route.kml').read_bytes()
+    "default_route.kml", (ROOT / "data" / "default_route.kml").read_bytes()
 )
-_, default_points = read_geo(
-    'default_points.kml', (ROOT / 'data/default_points.kml').read_bytes()
+_, demo_points = read_geo(
+    "default_points.kml", (ROOT / "data" / "default_points.kml").read_bytes()
 )
-uploaded_routes = []
-uploaded_points = []
-for file in geo_uploads or []:
-    file_routes, file_points = load_uploaded(file.name, file.getvalue())
-    uploaded_routes.extend(file_routes)
-    uploaded_points.extend(file_points)
 
-routes = uploaded_routes if uploaded_routes else demo_routes
-points = default_points + uploaded_points + st.session_state['manual_points']
+uploaded_routes, uploaded_points = [], []
+for uploaded_file in uploads or []:
+    lines, markers = parse_upload(uploaded_file.name, uploaded_file.getvalue())
+    uploaded_routes.extend(lines)
+    uploaded_points.extend(markers)
 
+saved_routes = st.session_state.get("saved_routes")
+saved_points = st.session_state.get("saved_points")
 if uploaded_routes:
-    route_status = f'Загружено треков: {len(uploaded_routes)} (файлов: {len(geo_uploads)})'
-elif geo_uploads:
-    route_status = 'Пример трека: загруженные файлы содержат только точки'
+    # Uploaded tracks REPLACE the demo (and its 28 demo obstacles).
+    routes = uploaded_routes
+    points = uploaded_points + st.session_state["manual_points"]
+    route_status = f"Загружено треков: {len(routes)}"
+elif saved_routes is not None:
+    routes = saved_routes
+    points = (saved_points or []) + uploaded_points + st.session_state["manual_points"]
+    route_status = "Сохранённый трек"
 else:
-    route_status = 'Пример трека из проекта'
+    routes = demo_routes
+    points = demo_points + uploaded_points + st.session_state["manual_points"]
+    route_status = "Пример трека из проекта"
 
+geo_hash = hashlib.sha256(
+    json.dumps([routes, points], ensure_ascii=False, sort_keys=True).encode()
+).hexdigest()
+if st.session_state.get("last_geo_hash") != geo_hash:
+    st.session_state["last_geo_hash"] = geo_hash
+    st.session_state.pop("scenes", None)
+    st.session_state.pop("scene_query", None)
+    if not st.session_state.get("pending_restore"):
+        st.session_state["tiles"] = []
+        st.session_state["image_caption"] = ""
+        st.session_state["selection"] = None
 
+bbox = search_geometry(routes, points if not routes else [], buffer_m=4500)["bbox"]
 
-geo_hash = hashlib.sha256(json.dumps([routes, points], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-if st.session_state.get('last_geo_hash') != geo_hash:
-    st.session_state['last_geo_hash'] = geo_hash
-    st.session_state.pop('tiles', None)
-    st.session_state.pop('image_caption', None)
-    st.session_state.pop('scenes', None)
-    st.session_state.pop('scene_query', None)
-    st.session_state.pop('median_scene_count', None)
-
-bbox = search_geometry(routes, points if not routes else [], buffer_m=4500)['bbox']
-
-project = setting('GEE_PROJECT', '')
-service = setting('GEE_SERVICE_ACCOUNT', None)
+project = setting("GEE_PROJECT", "")
+service = setting("GEE_SERVICE_ACCOUNT")
 if service is None:
     try:
-        if 'gee_service_account' in st.secrets:
-            service = dict(st.secrets['gee_service_account'])
+        if "gee_service_account" in st.secrets:
+            service = dict(st.secrets["gee_service_account"])
     except (FileNotFoundError, KeyError):
         pass
 if isinstance(service, str):
@@ -167,129 +251,260 @@ connected = False
 connection_error = None
 try:
     connected = connect_ee(project, json.dumps(service, sort_keys=True) if service else None)
-except (EarthEngineUnavailable, Exception) as exc:
+except Exception as exc:
     connection_error = str(exc)
 
-st.title('Анализ снежной обстановки')
-st.caption(f'Маршрут: {route_status} · линий: {len(routes)} · точек: {len(points)}. '
-           'Данные о снеге — NDSI; изотермы — модельная оценка ERA5-Land.')
+# Reconstruct Earth Engine map URLs when restoring a saved research link.
+# The short-lived GEE tile URLs themselves are not persisted.
+if st.session_state.get("pending_restore") and connected:
+    sel = st.session_state.get("selection") or {}
+    try:
+        with st.spinner("Восстанавливаю сохранённый снимок..."):
+            if sel.get("kind") == "scene":
+                day = date.fromisoformat(sel["day"])
+                raw = scene_image(sel["satellite"], bbox, day, sel.get("image_id"), mask_clouds=False)
+                masked = scene_image(sel["satellite"], bbox, day, sel.get("image_id"), mask_clouds=True)
+                caption = f"{sel['satellite']} · {day} · сохранённая сцена"
+            elif sel.get("kind") == "median":
+                day = date.fromisoformat(sel["start"])
+                raw, masked, count = median_images(
+                    sel["satellite"], bbox, day, int(sel["length"])
+                )
+                caption = f"Медианная мозаика · {sel['satellite']} · {count} сцен"
+            else:
+                raise ValueError("Неизвестный тип сохранённого снимка.")
+            tiles, warnings = build_tile_layers(raw, bbox, day, masked)
+            st.session_state["tiles"] = tiles
+            st.session_state["image_caption"] = caption
+            st.session_state["warnings"] = warnings
+        st.session_state["pending_restore"] = False
+    except Exception as exc:
+        st.session_state["pending_restore"] = False
+        st.warning(f"Не удалось восстановить спутниковый слой: {exc}")
+
+st.title("Анализ снежной обстановки")
+st.caption(
+    f"Трек: {route_status} · линий: {len(routes)} · точек: {len(points)}. "
+    "Снег — по NDSI; изотермы — модельная оценка ERA5-Land."
+)
 
 with st.sidebar:
     if not connected:
-        st.warning('Earth Engine пока не подключён. Маршрут отображается, но спутниковые слои недоступны.')
-    if mode == 'Конкретный снимок':
-        st.markdown('**3. Найти реальную дату съёмки**')
-        col_year, col_month = st.columns(2)
-        year = col_year.selectbox('Год', list(range(date.today().year, 2016, -1)), index=0, key='year')
-        month = col_month.selectbox('Месяц', list(MONTHS), index=5, format_func=lambda x: MONTHS[x], key='month')
+        st.warning("Earth Engine недоступен. Трек отображается, но снимки пока не загрузить.")
+    if mode == "Конкретный снимок":
+        st.markdown("**3. Найти реальную дату съёмки**")
+        year_col, month_col = st.columns(2)
+        year = year_col.selectbox(
+            "Год", list(range(date.today().year, 2016, -1)), key="year"
+        )
+        month = month_col.selectbox(
+            "Месяц", list(MONTHS), format_func=lambda m: MONTHS[m], key="month"
+        )
         query = (satellite, tuple(round(v, 6) for v in bbox), year, month)
-        if st.button('Найти доступные даты', disabled=not connected, use_container_width=True):
-            with st.spinner('Получаю перечень реальных сцен из GEE...'):
+        if st.button("Найти доступные даты", disabled=not connected, use_container_width=True):
+            with st.spinner("Получаю перечень сцен из Earth Engine..."):
                 try:
-                    scenes = cached_scenes(*query)
-                    st.session_state['scenes'] = scenes
-                    st.session_state['scene_query'] = query
+                    st.session_state["scenes"] = cached_scenes(*query)
+                    st.session_state["scene_query"] = query
                 except Exception as exc:
-                    st.error(f'Не удалось найти снимки: {exc}')
-        if st.session_state.get('scene_query') == query:
-            available = st.session_state.get('scenes') or []
-            actual_days = sorted({x['date'] for x in available}, reverse=True)
-            st.caption(f'Найдено сцен: {len(available)}; дней съёмки: {len(actual_days)}')
-            if actual_days:
-                chosen_day = st.selectbox('Дата съёмки', actual_days)
-                chosen_scenes = [x for x in available if x['date'] == chosen_day]
-                choices = ['Все сцены этой даты (без смешивания дней)'] + [x['label'] for x in chosen_scenes]
-                choice = st.selectbox('Сцена', choices)
-                if st.button('Показать снимок', disabled=not connected, type='primary', use_container_width=True):
-                    image_id = None if choice == choices[0] else chosen_scenes[choices.index(choice)-1]['image_id']
-                    if choice != choices[0] and not image_id:
-                        st.error('У сцены отсутствует идентификатор GEE; попробуйте «Все сцены этой даты».')
+                    st.error(f"Не удалось найти снимки: {exc}")
+        if st.session_state.get("scene_query") == query:
+            available = st.session_state.get("scenes") or []
+            days_available = sorted({s["date"] for s in available}, reverse=True)
+            st.caption(f"Найдено сцен: {len(available)}; дней съёмки: {len(days_available)}")
+            if days_available:
+                chosen = st.selectbox("Дата съёмки", days_available)
+                scene_items = [s for s in available if s["date"] == chosen]
+                scene_choices = ["Все сцены этой даты"] + [s["label"] for s in scene_items]
+                choice = st.selectbox("Сцена", scene_choices)
+                if st.button("Показать снимок", disabled=not connected, type="primary", use_container_width=True):
+                    image_id = None if choice == scene_choices[0] else scene_items[scene_choices.index(choice)-1]["image_id"]
+                    if choice != scene_choices[0] and not image_id:
+                        st.error("Нет ID сцены. Выберите все сцены этой даты.")
                     else:
-                        with st.spinner('Создаю картографические слои...'):
+                        with st.spinner("Создаю картографические слои..."):
                             try:
-                                day = date.fromisoformat(chosen_day)
-                                image = scene_image(satellite, bbox, day, image_id, mask_clouds=False)
+                                day = date.fromisoformat(chosen)
+                                raw = scene_image(satellite, bbox, day, image_id, mask_clouds=False)
                                 masked = scene_image(satellite, bbox, day, image_id, mask_clouds=True)
-                                tiles, warnings = build_tile_layers(image, bbox, day, masked)
-                                st.session_state['tiles'] = tiles
-                                st.session_state['image_caption'] = f'{satellite} · {chosen_day} · {choice}'
-                                st.session_state['warnings'] = warnings
+                                tiles, warnings = build_tile_layers(raw, bbox, day, masked)
+                                st.session_state["tiles"] = tiles
+                                st.session_state["image_caption"] = (
+                                    f"{satellite} · {chosen} · {choice}"
+                                )
+                                st.session_state["warnings"] = warnings
+                                st.session_state["selection"] = {
+                                    "kind": "scene", "satellite": satellite,
+                                    "day": chosen, "image_id": image_id,
+                                }
                             except Exception as exc:
-                                st.error(f'Ошибка при создании снимка: {exc}')
+                                st.error(f"Ошибка при создании снимка: {exc}")
             else:
-                st.info('В этом месяце снимков нет.')
+                st.caption("Для выбранного месяца снимков не найдено.")
         else:
-            st.caption('Выберите год и месяц, затем нажмите «Найти доступные даты».')
+            st.caption("Выберите год и месяц, затем нажмите «Найти доступные даты».")
     else:
-        st.markdown('**3. Медианная мозаика**')
-        median_start = st.date_input('Первый день интервала', value=date(2025, 6, 1))
-        median_length = st.slider('Длительность, календарных дней', min_value=2, max_value=9, value=5, step=1)
-        median_end = median_start + timedelta(days=median_length - 1)
-        st.caption(f'В мозаику попадут сцены с {median_start:%d.%m.%Y} по {median_end:%d.%m.%Y} включительно.')
-        median_scene_count = None
+        st.markdown("**3. Медианная мозаика**")
+        median_start = st.date_input(
+            "Первый день интервала", value=date(2025, 6, 1), key="median_start"
+        )
+        median_length = st.slider(
+            "Длительность, календарных дней", 2, 9, 5, 1, key="median_length"
+        )
+        median_end = median_start + timedelta(days=median_length-1)
+        st.caption(
+            f"В мозаику попадут сцены с {median_start:%d.%m.%Y} "
+            f"по {median_end:%d.%m.%Y} включительно."
+        )
+        count = None
         if connected:
             try:
-                with st.spinner('Проверяю количество доступных сцен...'):
-                    median_scene_count = cached_interval_count(
-                        satellite, tuple(round(v, 6) for v in bbox), median_start, median_length
+                with st.spinner("Считаю сцены за выбранный интервал..."):
+                    count = cached_interval_count(
+                        satellite, tuple(round(v, 6) for v in bbox),
+                        median_start, median_length
                     )
-                st.info(f'Найдено спутниковых сцен за выбранный интервал: **{median_scene_count}**.')
-                if median_scene_count == 0:
-                    st.caption('В этом интервале нет снимков — выберите другую дату.')
+                # Neutral grey caption rather than a blue alert.
+                st.caption(f"Найдено спутниковых сцен за выбранный интервал: {count}.")
             except Exception as exc:
-                st.warning(f'Количество сцен пока не удалось определить: {exc}')
-        if st.button('Показать медиану', disabled=(not connected or median_scene_count == 0),
-                     type='primary', use_container_width=True):
-            with st.spinner('Рассчитываю медианную мозаику...'):
+                st.warning(f"Не удалось определить количество сцен: {exc}")
+        if st.button(
+            "Показать медиану",
+            disabled=(not connected or count == 0),
+            type="primary", use_container_width=True
+        ):
+            with st.spinner("Создаю медианную мозаику..."):
                 try:
-                    image, masked, count = median_images(
-                        satellite, bbox, median_start, median_length,
-                        count=median_scene_count,
+                    raw, masked, actual_count = median_images(
+                        satellite, bbox, median_start, median_length, count=count
                     )
-                    tiles, warnings = build_tile_layers(image, bbox, median_start, masked)
-                    st.session_state['tiles'] = tiles
-                    st.session_state['image_caption'] = (
-                        f'Медианная мозаика · {satellite} · {median_start}–{median_end} · '
-                        f'{count} сцен за {median_length} дней'
+                    tiles, warnings = build_tile_layers(raw, bbox, median_start, masked)
+                    st.session_state["tiles"] = tiles
+                    st.session_state["image_caption"] = (
+                        f"Медиана {satellite} · {median_start}–{median_end} · "
+                        f"{actual_count} сцен"
                     )
-                    st.session_state['median_scene_count'] = count
-                    st.session_state['warnings'] = warnings
+                    st.session_state["warnings"] = warnings
+                    st.session_state["selection"] = {
+                        "kind": "median", "satellite": satellite,
+                        "start": median_start.isoformat(), "length": median_length,
+                    }
                 except Exception as exc:
-                    st.error(f'Ошибка при расчёте медианы: {exc}')
+                    st.error(f"Ошибка при расчёте медианы: {exc}")
 
     st.divider()
-    st.caption('В «Слоях карты» можно переключать маску облаков, прозрачность, подписи точек и подложку.')
+    st.subheader("4. Заметки")
+    with st.form("note_form", clear_on_submit=True):
+        new_note = st.text_area(
+            "Наблюдение о снеговой обстановке",
+            placeholder="Например, 15 июня на северном склоне сохраняется снег...",
+            max_chars=3000,
+            height=90,
+        )
+        if st.form_submit_button("Добавить заметку", use_container_width=True):
+            if new_note.strip():
+                import secrets
+                st.session_state["notes"].append({
+                    "id": secrets.token_hex(8),
+                    "text": new_note.strip(),
+                    "created": date.today().isoformat(),
+                })
+    for note in st.session_state["notes"]:
+        with st.expander(f"{note.get('created','')} · {note.get('text','')[:45]}"):
+            st.write(note.get("text", ""))
+            if st.button("Удалить заметку", key="delete_note_"+note["id"]):
+                st.session_state["notes"] = [
+                    n for n in st.session_state["notes"] if n["id"] != note["id"]
+                ]
+                st.rerun()
+
+    st.divider()
+    st.subheader("5. Сохранение по ссылке")
+    st.text_input("Название исследования", key="research_name", max_chars=120)
+    current_token = st.session_state.get("active_token")
+    if not store:
+        st.caption(
+            "Чтобы сохранить исследование по ссылке, настройте "
+            "SUPABASE_URL и SUPABASE_SECRET_KEY в Secrets. "
+            "До этого текущая карта работает без сохранения на сервере."
+        )
+    elif current_token:
+        st.caption("Автосохранение включено. Любой, у кого есть ссылка, может редактировать исследование.")
+        st.code(share_link(current_token), language=None)
+    elif st.button("Сохранить и получить ссылку", type="primary", use_container_width=True):
+        try:
+            payload = research_payload(routes, points)
+            token = store.create(payload)
+            st.session_state["active_token"] = token
+            st.session_state["loaded_map_revision"] = token
+            st.session_state["last_saved_digest"] = hashlib.sha256(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+            st.query_params["session"] = token
+            st.success("Ссылка создана. Скопируйте адрес исследования ниже.")
+            st.code(share_link(token), language=None)
+        except (SessionStorageError, ValueError) as exc:
+            st.error(f"Не удалось сохранить исследование: {exc}")
+
+    st.caption(
+        "Прозрачность снимка, подписи точек, маску облаков и подложку "
+        "можно менять прямо в «Слоях карты»."
+    )
 
 if connection_error:
-    with st.expander('Настройка доступа к Earth Engine'):
+    with st.expander("Настройка доступа к Earth Engine"):
         st.write(connection_error)
-        st.markdown('Укажите `GEE_PROJECT` и настройте авторизацию по инструкции из `README.md`. Секреты не загружайте на GitHub.')
+        st.caption("Секреты не нужно добавлять в GitHub.")
 
-caption = st.session_state.get('image_caption', 'Трек без спутникового снимка')
-tiles = st.session_state.get('tiles', [])
-
-# Optional: Google Maps Platform Maps Tiles API, not the Earth Engine key.
+caption = st.session_state.get("image_caption", "Трек без спутникового снимка")
+tiles = st.session_state.get("tiles", [])
 google_terrain = None
-maps_api_key = setting('GOOGLE_MAPS_API_KEY', '')
-if maps_api_key:
+maps_key = setting("GOOGLE_MAPS_API_KEY", "")
+if maps_key:
     try:
         google_terrain = cached_google_terrain(
-            str(maps_api_key), tuple(round(float(v), 6) for v in bbox)
+            str(maps_key), tuple(round(float(v), 6) for v in bbox)
         )
     except Exception:
-        # Google basemap is optional; fall back gracefully to Esri and OSM.
-        google_terrain = None
-        st.info('Google Terrain недоступен: проверьте Maps Tile API, API-ключ и биллинг. '
-                'Остальные подложки работают без этого ключа.')
+        st.caption("Google Terrain недоступен; другие подложки работают.")
 
-components.html(
-    map_html(routes, points, tiles, caption, google_terrain=google_terrain),
-    height=790,
-    scrolling=False,
+config = map_config(
+    routes, points, tiles, caption, google_terrain,
+    st.session_state.get("map_state", {}),
 )
-for warning in st.session_state.get('warnings', []):
+# The component stays mounted on ordinary reruns; it is recreated only for a
+# changed geometry/image or when a different shareable session is loaded.
+render_id = hashlib.sha256(
+    json.dumps(
+        [routes, points, tiles, caption,
+         st.session_state.get("loaded_map_revision", "")],
+        ensure_ascii=False, sort_keys=True
+    ).encode()
+).hexdigest()[:24]
+map_event = research_map(config=config, render_id=render_id)
+if isinstance(map_event, dict) and isinstance(map_event.get("map_state"), dict):
+    st.session_state["map_state"] = map_event["map_state"]
+
+for warning in st.session_state.get("warnings", []):
     st.warning(warning)
 if tiles:
-    st.caption('Изначально показан снимок без маски облаков; её можно включить в «Слоях карты». '
-               'Граница снега определена по NDSI и может включать ледники. Изотермы являются приближёнными: '
-               'ERA5-Land (~11 км) с фиксированной высотной поправкой 6 °C/км, а не измерения на перевалах.')
+    st.caption(
+        "Снимок без облачной маски включён по умолчанию. "
+        "Граница снега по NDSI может включать ледники. "
+        "Изотермы ERA5-Land являются модельной оценкой."
+    )
+
+# Autosave if the state has actually changed. No credentials or tile URLs
+# are included in the stored payload.
+token = st.session_state.get("active_token")
+if store and token:
+    try:
+        snapshot = research_payload(routes, points)
+        snapshot_digest = hashlib.sha256(
+            json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+        if snapshot_digest != st.session_state.get("last_saved_digest"):
+            store.save(token, snapshot)
+            st.session_state["last_saved_digest"] = snapshot_digest
+    except (SessionStorageError, ValueError, TypeError) as exc:
+        st.warning(f"Автосохранение не выполнено: {exc}")

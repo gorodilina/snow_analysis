@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" onerror="this.onerror=null;this.removeAttribute('integrity');this.href='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css'" />
+<style>
+html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-system,Arial,sans-serif}
+#map{background:#e8eef0}
+#layer-control{position:absolute;z-index:1000;top:12px;right:12px;width:min(310px,calc(100% - 24px));box-shadow:0 4px 16px #0002;border:1px solid #ccd3d9;border-radius:12px;background:#fff;color:#1c2930;overflow:hidden;font-size:13px}
+#layers-head{width:100%;border:0;background:#fff;padding:11px 13px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;text-align:left;font-weight:700;font-size:14px}
+#layers-body{max-height:55vh;overflow:auto;padding:3px 12px 12px}
+#layer-control.collapsed #layers-body{display:none}
+.layer-row{border-top:1px solid #edf0f2;padding:8px 0 6px}
+.layer-check{display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:550}
+.layer-check input{accent-color:#2667b7;width:16px;height:16px;flex-shrink:0}
+.opacity-row{padding:5px 0 0 23px;display:flex;gap:8px;align-items:center;color:#5d6873;font-size:11px}
+.opacity-row input{flex:1;min-width:50px}
+.base-opt{display:block;padding:5px 0;cursor:pointer}
+.base-opt input{accent-color:#2667b7}
+.label-icon{white-space:nowrap;background:rgba(255,255,255,.88);font-weight:600;color:#222;padding:2px 5px;border:1px solid #5558;border-radius:4px;font-size:11px;text-shadow:0 1px 1px #fff;box-shadow:0 1px 3px #0002}
+.leaflet-control-attribution{font-size:9px !important}
+#top-note{position:absolute;z-index:900;bottom:28px;left:12px;background:#fffffff0;padding:7px 10px;border-radius:7px;font-size:12px;max-width:65%;pointer-events:none;box-shadow:0 1px 6px #0002}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="layer-control">
+  <button id="layers-head" type="button"><span>☷ Слои карты</span><span id="arrow">▾</span></button>
+  <div id="layers-body">
+    <b>Подложка</b><div id="basemaps"></div>
+    <b>Данные</b><div id="overlays"></div>
+    <div style="margin-top:10px;color:#6b7280;font-size:11px">Прозрачность, подписи и маска облаков настраиваются здесь. Режимы снимка с маской и без неё взаимоисключающие.</div>
+  </div>
+</div>
+<div id="top-note"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+'use strict';
+// v1 bidirectional Streamlit component: the parent sends config on render.
+let activeMap = null;
+let lastRenderId = null;
+let activeSnapshotTimer = null;
+function setComponentValue(value) {
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: 'streamlit:setComponentValue',
+    value: value,
+    dataType: 'json'
+  }, '*');
+}
+function initializeMap(config) {
+if (activeMap) {
+  activeMap.remove();
+  document.getElementById('map').innerHTML='';
+}
+const restored = config.mapState || {};
+let canReportChanges = false;
+function collectState() {
+  const c=map.getCenter();
+  const namedBase=Object.keys(bases).find(name=>bases[name]===currentBase) || 'Рельеф (Esri)';
+  const layerState={};
+  for (const o of overlays) {
+    layerState[o.name]={
+      visible:map.hasLayer(o.layer),
+      opacity:Number(o.layer.options.opacity || 0)
+    };
+  }
+  return {
+    base:namedBase,
+    overlays:layerState,
+    track:map.hasLayer(routeGroup),
+    points:map.hasLayer(pointGroup),
+    labels:map.hasLayer(labelGroup),
+    center:[Number(c.lat.toFixed(6)), Number(c.lng.toFixed(6))],
+    zoom:map.getZoom()
+  };
+}
+function reportChange() {
+  if (!canReportChanges) return;
+  clearTimeout(activeSnapshotTimer);
+  activeSnapshotTimer=setTimeout(()=>{
+    setComponentValue({map_state:collectState(), event_id:Date.now()});
+  },700);
+}
+
+const map = L.map('map', {zoomControl:true, preferCanvas:true});
+activeMap = map;
+const bases = {
+  'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
+  'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,attribution:'© OpenStreetMap contributors'}),
+  'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Imagery © Esri and providers'})
+};
+// The official Google Map Tiles API requires a paid Maps Platform project,
+// enabled Map Tiles API and a separately restricted GOOGLE_MAPS_API_KEY.
+// No unofficial Google tile URLs are used here.
+const googleConfig = config.googleTerrain || {};
+if (googleConfig.url) {
+  bases['Google Terrain'] = L.tileLayer(googleConfig.url, {
+    maxZoom:20,
+    attribution: '© Google Maps · ' + escGoogleAttribution(googleConfig.attribution || 'Map data © Google Maps')
+  });
+}
+function escGoogleAttribution(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
+let currentBase = bases[restored.base] || bases['Рельеф (Esri)'];
+currentBase.addTo(map);
+let baseErrorCount = 0;
+let switchedBaseAutomatically = false;
+currentBase.on('tileerror',()=>{
+  baseErrorCount++;
+  if (baseErrorCount>=4 && !switchedBaseAutomatically && map.hasLayer(currentBase)) {
+    switchedBaseAutomatically=true;
+    map.removeLayer(currentBase);
+    currentBase=bases['OpenStreetMap'];
+    currentBase.addTo(map);
+    currentBase.bringToBack();
+    const osmRadio = document.querySelector('input[name="base"][value="OpenStreetMap"]');
+    if (osmRadio) osmRadio.checked=true;
+    document.getElementById('top-note').textContent=(config.caption||'Карта')+
+      ' · рельефная подложка недоступна, автоматически включена OpenStreetMap';
+  }
+});
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+const routeGroup = L.featureGroup();
+for (const item of config.routes){
+  if (!item.coordinates || item.coordinates.length < 2) continue;
+  let latlngs = item.coordinates.map(p=>[p[1],p[0]]);
+  L.polyline(latlngs, {color:'#ff148e',weight:4,opacity:.95}).bindPopup(esc(item.name)).addTo(routeGroup);
+}
+if (restored.track !== false) routeGroup.addTo(map);
+const pointGroup = L.featureGroup();
+const labelGroup = L.featureGroup();
+for (const point of config.points){
+  const [lon,lat] = point.coordinates;
+  L.circleMarker([lat,lon], {radius:5,color:'#1c2530',weight:1.2,fillColor:'#ffe447',fillOpacity:1})
+    .bindPopup('<b>'+esc(point.name)+'</b><div>'+lat.toFixed(5)+', '+lon.toFixed(5)+'</div>').addTo(pointGroup);
+  const tag = L.divIcon({className:'', html:'<span class="label-icon">'+esc(point.name)+'</span>',iconSize:null,iconAnchor:[-10,4]});
+  L.marker([lat,lon], {icon:tag,interactive:false}).addTo(labelGroup);
+}
+if (restored.points !== false) pointGroup.addTo(map);
+if (restored.labels === true) labelGroup.addTo(map);
+// Labels: users control their visibility in the map's Layers menu.
+const overlays = [];
+for (const entry of config.tiles){
+  if (!entry.url) continue;
+  const saved=(restored.overlays||{})[entry.name]||{};
+  const opacity=(typeof saved.opacity==='number')?saved.opacity:entry.opacity;
+  const visible=(typeof saved.visible==='boolean')?saved.visible:entry.visible;
+  const layer=L.tileLayer(entry.url, {opacity:opacity, maxZoom:20,attribution:'© Google Earth Engine / Copernicus / USGS',crossOrigin:true});
+  if (visible) layer.addTo(map);
+  let errors=0;
+  layer.on('tileerror',()=>{
+    errors++;
+    if (errors===4) {
+      const note=document.getElementById('top-note');
+      note.textContent=(config.caption||'Спутниковый слой')+
+        ' · не удалось загрузить тайлы слоя «'+entry.name+'». Попробуйте обновить снимок.';
+    }
+  });
+  overlays.push({name:entry.name, layer:layer,visible:visible, opacity:opacity, role:entry.role||null, checkbox:null});
+}
+const basemapDiv=document.querySelector('#basemaps');
+for (const [name, layer] of Object.entries(bases)) {
+  const row=document.createElement('label');row.className='base-opt';
+  const input=document.createElement('input');input.type='radio';input.name='base';input.value=name;input.checked=name===(restored.base||'Рельеф (Esri)');
+  input.onchange=()=>{map.removeLayer(currentBase);currentBase=layer;currentBase.addTo(map);currentBase.bringToBack();reportChange();};
+  row.append(input, document.createTextNode(' '+name));basemapDiv.append(row);
+}
+if (!googleConfig.url) {
+  const note=document.createElement('div');
+  note.className='base-opt';
+  note.style.color='#808991';
+  note.textContent='Google Terrain (потребуется API-ключ)';
+  basemapDiv.append(note);
+}
+if (bases['Google Terrain']) {
+  bases['Google Terrain'].on('tileerror',()=>{
+    if(currentBase===bases['Google Terrain']) {
+      map.removeLayer(currentBase);
+      currentBase=bases['Рельеф (Esri)'];
+      currentBase.addTo(map);
+      const fallback=document.querySelector('input[name="base"][value="Рельеф (Esri)"]');
+      if(fallback) fallback.checked=true;
+      document.getElementById('top-note').textContent='Google Terrain: ошибка загрузки тайлов. Проверьте ключ и Maps Tile API.';
+    }
+  });
+}
+// Google Maps Map Tiles API requires viewport-specific data attribution.
+// Refresh it on each map move when supported by the provider.
+if (googleConfig.viewportUrl) {
+  let attributionTimer;
+  map.on('moveend', () => {
+    if (currentBase !== bases['Google Terrain']) return;
+    clearTimeout(attributionTimer);
+    attributionTimer=setTimeout(() => {
+      const b=map.getBounds();
+      const url=googleConfig.viewportUrl +
+        '&zoom='+map.getZoom() +
+        '&north='+b.getNorth()+'&south='+b.getSouth()+
+        '&east='+b.getEast()+'&west='+b.getWest();
+      fetch(url).then(x=>x.ok?x.json():Promise.reject(x.status))
+      .then(data=>{
+        const copyright=escGoogleAttribution(data.copyright || googleConfig.attribution || '');
+        bases['Google Terrain'].getAttribution=()=> '© Google Maps · '+copyright;
+        map.attributionControl._update();
+      }).catch(()=>{}); // Initial viewport copyright remains as fallback.
+    },350);
+  });
+}
+const overlayDiv=document.querySelector('#overlays');
+function addCheck(name, layer, initial, opacity, role){
+  const wrapper=document.createElement('div');wrapper.className='layer-row';
+  const label=document.createElement('label');label.className='layer-check';
+  const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=initial;
+  label.append(checkbox,document.createTextNode(name));wrapper.append(label);
+  checkbox.onchange=()=>{
+    if (role==='raw'||role==='masked') {
+      if (checkbox.checked) {
+        // Exclusive image modes: masked transparency must reveal the basemap,
+        // not the unmasked RGB layer beneath it.
+        for (const other of overlays) {
+          if (other.role && other.role!==role) {
+            map.removeLayer(other.layer);
+            if (other.checkbox) other.checkbox.checked=false;
+          }
+        }
+        map.addLayer(layer);
+      } else {
+        map.removeLayer(layer);
+      }
+    } else {
+      checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
+    }
+    reportChange();
+  };
+  if (opacity!==null && opacity!==undefined && layer.setOpacity){
+    const line=document.createElement('div');line.className='opacity-row';
+    const caption=document.createElement('span');caption.textContent='Прозрачность';
+    const slider=document.createElement('input');slider.type='range';slider.min=0;slider.max=100;slider.step=5;slider.value=Math.round(opacity*100);
+    const percent=document.createElement('span');percent.textContent=slider.value+'%';
+    slider.oninput=()=>{const val=Number(slider.value)/100;layer.setOpacity(val);percent.textContent=slider.value+'%';reportChange();};
+    line.append(caption,slider,percent);wrapper.append(line);
+  }
+  overlayDiv.append(wrapper);
+  return checkbox;
+}
+for (const item of overlays) {
+  item.checkbox=addCheck(item.name,item.layer,item.visible,item.opacity,item.role);
+}
+addCheck('Трек',routeGroup,restored.track !== false,null,null);
+addCheck('Точки / препятствия',pointGroup,restored.points !== false,null,null);
+addCheck('Подписи точек',labelGroup,restored.labels === true,null,null);
+const bounds=config.bounds;
+if (restored.center && Array.isArray(restored.center) && restored.center.length===2 && Number.isFinite(Number(restored.zoom))) {
+  map.setView(restored.center, restored.zoom);
+} else if (bounds && bounds.length===2) map.fitBounds(bounds,{padding:[32,32],maxZoom:13});
+else map.setView([42.18,46.72],10);
+document.getElementById('top-note').textContent=config.caption||'Без спутникового снимка: сначала выберите дату в панели слева';
+document.getElementById('layers-head').onclick=()=>{
+ const p=document.getElementById('layer-control');p.classList.toggle('collapsed');
+ document.getElementById('arrow').textContent=p.classList.contains('collapsed')?'▸':'▾';
+};
+// Resizing the containing Streamlit element does not require rebuilding the map.
+// Streamlit can resize an iframe after the first layout pass.
+// A delayed invalidateSize keeps tile grids and vector overlays aligned.
+function refreshMapSize(){ map.invalidateSize({pan:false,animate:false}); }
+window.addEventListener('resize',refreshMapSize);
+window.requestAnimationFrame(refreshMapSize);
+window.setTimeout(refreshMapSize,250);
+window.setTimeout(refreshMapSize,1000);
+if (window.ResizeObserver) {
+  new ResizeObserver(refreshMapSize).observe(document.getElementById('map'));
+}
+// Do not autosave the initial fitBounds or restored state.
+window.setTimeout(()=>{canReportChanges=true;},900);
+map.on('moveend',reportChange);
+}
+window.addEventListener('message', function(event) {
+  if (!event.data || event.data.type !== 'streamlit:render') return;
+  const args=event.data.args||{};
+  const renderId=String(args.render_id||'initial');
+  if (renderId !== lastRenderId) {
+    lastRenderId=renderId;
+    initializeMap(args.config||{routes:[],points:[],tiles:[]});
+  }
+  window.parent.postMessage({
+    isStreamlitMessage:true,
+    type:'streamlit:setFrameHeight',
+    height:790
+  }, '*');
+});
+window.parent.postMessage({
+  isStreamlitMessage:true,
+  type:'streamlit:componentReady',
+  apiVersion:1
+}, '*');
+</script>
+</body>
+</html>

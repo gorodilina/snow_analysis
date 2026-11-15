@@ -107,12 +107,9 @@ else:
     routes, _ = load_uploaded(route_upload.name, route_upload.getvalue())
     route_status = route_upload.name
 
+# No hardcoded Dagestan obstacles in a reusable snow-analysis application.
+# Only user-uploaded or manually added points appear on the map.
 points = []
-# Demo obstacles belong ONLY to the bundled example route.
-# They never appear on a user's uploaded GPX/KML track.
-if route_upload is None:
-    _, original = read_geo('default_points.kml', (ROOT / 'data/default_points.kml').read_bytes())
-    points += original
 for file in points_upload or []:
     _, found = load_uploaded(file.name, file.getvalue())
     points += found

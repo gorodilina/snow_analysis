@@ -86,43 +86,56 @@ def list_month_scenes(satellite: str, bbox: list[float], year: int, month: int) 
     return output
 
 
-def _sentinel(image: ee.Image) -> ee.Image:
+def _sentinel(image: ee.Image, mask_clouds: bool = False) -> ee.Image:
+    """Keep original scene pixels by default; optional SCL cloud mask."""
+    rgb = image.select(["B2", "B3", "B4", "B11"], ["blue", "green", "red", "swir"]).multiply(0.0001)
+    if not mask_clouds:
+        return rgb
     scl = image.select("SCL")
     clear = (scl.neq(0).And(scl.neq(1)).And(scl.neq(3))
              .And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10)))
-    # Class 11 (snow/ice) MUST remain unmasked.
-    return (image.select(["B2", "B3", "B4", "B11"], ["blue", "green", "red", "swir"])
-            .multiply(0.0001).updateMask(clear))
+    # SCL 11 (snow/ice) is NOT removed.
+    return rgb.updateMask(clear)
 
 
-def _landsat(image: ee.Image) -> ee.Image:
+def _landsat(image: ee.Image, mask_clouds: bool = False) -> ee.Image:
+    """Keep all native valid scene pixels unless cloud masking is requested."""
+    rgb = (image.select(["SR_B2", "SR_B3", "SR_B4", "SR_B6"],
+                        ["blue", "green", "red", "swir"])
+           .multiply(0.0000275).add(-0.2))
+    if not mask_clouds:
+        return rgb
     qa = image.select("QA_PIXEL")
-    # Fill, dilated cloud, cirrus, cloud, cloud shadow. Do NOT mask snow (bit 5).
+    # Bits 0–4: fill, dilated cloud, cirrus, cloud and cloud shadow; snow bit retained.
     clear = qa.bitwiseAnd(31).eq(0).And(image.select("QA_RADSAT").eq(0))
-    return (image.select(["SR_B2", "SR_B3", "SR_B4", "SR_B6"], ["blue", "green", "red", "swir"])
-            .multiply(0.0000275).add(-0.2).updateMask(clear))
+    return rgb.updateMask(clear)
 
 
-def _prepare(image: ee.Image, satellite: str) -> ee.Image:
-    return _sentinel(image) if satellite == SENTINEL else _landsat(image)
+def _prepare(image: ee.Image, satellite: str, mask_clouds: bool = False) -> ee.Image:
+    return (_sentinel(image, mask_clouds) if satellite == SENTINEL
+            else _landsat(image, mask_clouds))
 
 
-def scene_image(satellite: str, bbox: list[float], day: date, image_id: str | None) -> ee.Image:
+def scene_image(satellite: str, bbox: list[float], day: date,
+                image_id: str | None, mask_clouds: bool = False) -> ee.Image:
     if image_id:
-        image = ee.Image(image_id)
-        return _prepare(image, satellite)
+        return _prepare(ee.Image(image_id), satellite, mask_clouds)
     collection = _source_images(satellite, bbox, day, day + timedelta(days=1))
-    return collection.map(_sentinel if satellite == SENTINEL else _landsat).mosaic()
+    return collection.map(lambda im: _prepare(im, satellite, mask_clouds)).mosaic()
 
 
-def median_image(satellite: str, bbox: list[float], first: date, length: int) -> ee.Image:
+def median_images(satellite: str, bbox: list[float], first: date,
+                  length: int) -> tuple[ee.Image, ee.Image, int]:
+    """Unmasked and cloud-masked median composites built from the SAME scenes."""
     if not 2 <= length <= 9:
         raise ValueError("Длительность медианы должна составлять 2–9 дней.")
     collection = _source_images(satellite, bbox, first, first + timedelta(days=length))
     count = collection.size().getInfo()
     if count == 0:
         raise ValueError("В выбранном интервале нет спутниковых сцен.")
-    return collection.map(_sentinel if satellite == SENTINEL else _landsat).median()
+    raw = collection.map(lambda im: _prepare(im, satellite, False)).median()
+    masked = collection.map(lambda im: _prepare(im, satellite, True)).median()
+    return raw, masked, count
 
 
 def _tile_url(image: ee.Image, vis: dict) -> str:
@@ -169,17 +182,29 @@ def _temperature_layers(bbox: list[float], day: date) -> list[dict]:
     return result
 
 
-def build_tile_layers(image: ee.Image, bbox: list[float], day: date) -> tuple[list[dict], list[str]]:
-    """Generate one RGB, one NDSI snow boundary, and temperature isoline overlays."""
+def build_tile_layers(image: ee.Image, bbox: list[float], day: date,
+                      masked_image: ee.Image) -> tuple[list[dict], list[str]]:
+    """Default unmasked scene + switchable masked layer, snow boundary and isotherms."""
     area = _roi(bbox)
-    layers = [{
-        "name": "Спутниковый снимок",
-        "url": _tile_url(image.clip(area), {
-            "bands": ["red", "green", "blue"], "min": 0.025, "max": 0.35, "gamma": 1.15,
-        }),
-        "opacity": 0.55,
-        "visible": True,
-    }]
+    rgb_vis = {
+        "bands": ["red", "green", "blue"], "min": 0.025, "max": 0.35, "gamma": 1.15,
+    }
+    layers = [
+        {
+            "name": "Снимок без маски",
+            "role": "raw",
+            "url": _tile_url(image.clip(area), rgb_vis),
+            "opacity": 0.55,
+            "visible": True,
+        },
+        {
+            "name": "Снимок с маской облаков",
+            "role": "masked",
+            "url": _tile_url(masked_image.clip(area), rgb_vis),
+            "opacity": 0.55,
+            "visible": False,
+        },
+    ]
     ndsi = image.normalizedDifference(["green", "swir"])
     valid = image.select("green").mask().And(image.select("swir").mask())
     snow = ndsi.gte(0.4).And(image.select("green").gt(0.1)).toByte().updateMask(valid)

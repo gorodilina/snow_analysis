@@ -39,6 +39,8 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
 'use strict';
 // v1 bidirectional Streamlit component: the parent sends config on render.
 let activeMap = null;
+let activeResizeObserver = null;
+let activeResizeHandler = null;
 let lastRenderId = null;
 let activeSnapshotTimer = null;
 function setComponentValue(value) {
@@ -50,10 +52,16 @@ function setComponentValue(value) {
   }, '*');
 }
 function initializeMap(config) {
+clearTimeout(activeSnapshotTimer);
+if (activeResizeObserver) { activeResizeObserver.disconnect(); activeResizeObserver=null; }
+if (activeResizeHandler) { window.removeEventListener('resize',activeResizeHandler); activeResizeHandler=null; }
 if (activeMap) {
   activeMap.remove();
   document.getElementById('map').innerHTML='';
 }
+// Reinitialize the controls as well as the Leaflet map.
+document.getElementById('basemaps').replaceChildren();
+document.getElementById('overlays').replaceChildren();
 const restored = config.mapState || {};
 let canReportChanges = false;
 function collectState() {
@@ -268,13 +276,17 @@ document.getElementById('layers-head').onclick=()=>{
 // Resizing the containing Streamlit element does not require rebuilding the map.
 // Streamlit can resize an iframe after the first layout pass.
 // A delayed invalidateSize keeps tile grids and vector overlays aligned.
-function refreshMapSize(){ map.invalidateSize({pan:false,animate:false}); }
-window.addEventListener('resize',refreshMapSize);
+function refreshMapSize(){
+  if (activeMap === map) map.invalidateSize({pan:false,animate:false});
+}
+activeResizeHandler=refreshMapSize;
+window.addEventListener('resize',activeResizeHandler);
 window.requestAnimationFrame(refreshMapSize);
 window.setTimeout(refreshMapSize,250);
 window.setTimeout(refreshMapSize,1000);
 if (window.ResizeObserver) {
-  new ResizeObserver(refreshMapSize).observe(document.getElementById('map'));
+  activeResizeObserver=new ResizeObserver(refreshMapSize);
+  activeResizeObserver.observe(document.getElementById('map'));
 }
 // Do not autosave the initial fitBounds or restored state.
 window.setTimeout(()=>{canReportChanges=true;},900);

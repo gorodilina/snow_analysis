@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 from geo_utils import GeoInputError, read_geo, search_geometry
 from gee_client import (
     EarthEngineUnavailable, SENTINEL, LANDSAT,
-    initialize_ee, list_month_scenes, scene_image, median_images, build_tile_layers,
+    initialize_ee, list_month_scenes, count_interval_scenes, scene_image, median_images, build_tile_layers,
 )
 from map_builder import map_html
 from google_terrain import get_google_terrain
@@ -59,6 +59,11 @@ def cached_google_terrain(api_key: str, bbox: tuple[float, ...]):
     return get_google_terrain(api_key, list(bbox))
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_interval_count(satellite: str, bbox: tuple[float, ...], first: date, length: int) -> int:
+    return count_interval_scenes(satellite, list(bbox), first, length)
+
+
 def load_uploaded(filename: str, data: bytes):
     try:
         return read_geo(filename, data)
@@ -71,11 +76,18 @@ with st.sidebar:
     st.title('🏔️ Анализ снежной обстановки')
     st.caption('Спутниковые снимки, граница снега и изотермы вдоль маршрута')
     st.subheader('1. Трек и точки')
-    route_upload = st.file_uploader('Загрузить маршрут KML или GPX', type=['kml', 'gpx'], key='route_file')
-    points_upload = st.file_uploader(
-        'Дополнительные точки KML, GPX или CSV',
-        type=['kml', 'gpx', 'csv'], accept_multiple_files=True, key='points_files'
+    geo_uploads = st.file_uploader(
+        'Загрузить треки и точки (KML, GPX, CSV)',
+        type=['kml', 'gpx', 'csv'],
+        accept_multiple_files=True,
+        key='geo_files',
+        help='Можно выбрать сколько угодно файлов: все треки объединяются, '
+             'все точки добавляются. CSV используется для точек.',
     )
+    st.caption('Можно выбрать несколько файлов одновременно. '
+               'Загруженные треки заменят демонстрационный трек; '
+               'исходные 28 точек сохраняются. '
+               'Точки и их подписи можно скрыть в «Слоях карты».')
 
     if 'manual_points' not in st.session_state:
         st.session_state['manual_points'] = []
@@ -99,21 +111,32 @@ with st.sidebar:
     satellite = st.selectbox('Источник', [SENTINEL, LANDSAT], index=0)
     mode = st.radio('Режим', ['Конкретный снимок', 'Медианная мозаика'], label_visibility='visible')
 
-# The app opens with the current supplied KML; uploading a route replaces it.
-if route_upload is None:
-    routes, _ = read_geo('default_route.kml', (ROOT / 'data/default_route.kml').read_bytes())
-    route_status = 'Пример трека из проекта'
-else:
-    routes, _ = load_uploaded(route_upload.name, route_upload.getvalue())
-    route_status = route_upload.name
+# Load all uploaded KML/GPX files through ONE widget.
+# Files can contain routes, points, or both. CSV files add points.
+demo_routes, _ = read_geo(
+    'default_route.kml', (ROOT / 'data/default_route.kml').read_bytes()
+)
+_, default_points = read_geo(
+    'default_points.kml', (ROOT / 'data/default_points.kml').read_bytes()
+)
+uploaded_routes = []
+uploaded_points = []
+for file in geo_uploads or []:
+    file_routes, file_points = load_uploaded(file.name, file.getvalue())
+    uploaded_routes.extend(file_routes)
+    uploaded_points.extend(file_points)
 
-# No hardcoded Dagestan obstacles in a reusable snow-analysis application.
-# Only user-uploaded or manually added points appear on the map.
-points = []
-for file in points_upload or []:
-    _, found = load_uploaded(file.name, file.getvalue())
-    points += found
-points += st.session_state['manual_points']
+routes = uploaded_routes if uploaded_routes else demo_routes
+points = default_points + uploaded_points + st.session_state['manual_points']
+
+if uploaded_routes:
+    route_status = f'Загружено треков: {len(uploaded_routes)} (файлов: {len(geo_uploads)})'
+elif geo_uploads:
+    route_status = 'Пример трека: загруженные файлы содержат только точки'
+else:
+    route_status = 'Пример трека из проекта'
+
+
 
 geo_hash = hashlib.sha256(json.dumps([routes, points], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 if st.session_state.get('last_geo_hash') != geo_hash:
@@ -203,10 +226,26 @@ with st.sidebar:
         median_length = st.slider('Длительность, календарных дней', min_value=2, max_value=9, value=5, step=1)
         median_end = median_start + timedelta(days=median_length - 1)
         st.caption(f'В мозаику попадут сцены с {median_start:%d.%m.%Y} по {median_end:%d.%m.%Y} включительно.')
-        if st.button('Показать медиану', disabled=not connected, type='primary', use_container_width=True):
+        median_scene_count = None
+        if connected:
+            try:
+                with st.spinner('Проверяю количество доступных сцен...'):
+                    median_scene_count = cached_interval_count(
+                        satellite, tuple(round(v, 6) for v in bbox), median_start, median_length
+                    )
+                st.info(f'Найдено спутниковых сцен за выбранный интервал: **{median_scene_count}**.')
+                if median_scene_count == 0:
+                    st.caption('В этом интервале нет снимков — выберите другую дату.')
+            except Exception as exc:
+                st.warning(f'Количество сцен пока не удалось определить: {exc}')
+        if st.button('Показать медиану', disabled=(not connected or median_scene_count == 0),
+                     type='primary', use_container_width=True):
             with st.spinner('Рассчитываю медианную мозаику...'):
                 try:
-                    image, masked, count = median_images(satellite, bbox, median_start, median_length)
+                    image, masked, count = median_images(
+                        satellite, bbox, median_start, median_length,
+                        count=median_scene_count,
+                    )
                     tiles, warnings = build_tile_layers(image, bbox, median_start, masked)
                     st.session_state['tiles'] = tiles
                     st.session_state['image_caption'] = (

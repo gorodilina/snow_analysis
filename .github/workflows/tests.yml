@@ -32,6 +32,7 @@ jobs:
           p=pathlib.Path('map_component/index.html')
           s=p.read_text()
           scripts=re.findall(r'<script(?:\s[^>]*)?>([\s\S]*?)</script>',s)
+          scripts=[script for script in scripts if script.strip()]
           assert len(scripts)==1, len(scripts)
           pathlib.Path('/tmp/snow_map.js').write_text(scripts[0])
           PY

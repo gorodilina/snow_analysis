@@ -431,6 +431,14 @@ with st.sidebar:
     elif current_token:
         st.caption("Автосохранение включено. Любой, у кого есть ссылка, может редактировать исследование.")
         st.code(share_link(current_token), language=None)
+        try:
+            st.link_button(
+                "Создать другое исследование",
+                st.context.url,
+                use_container_width=True,
+            )
+        except (AttributeError, RuntimeError):
+            st.caption("Для нового исследования откройте адрес приложения без ?session=…")
     elif st.button("Сохранить и получить ссылку", type="primary", use_container_width=True):
         try:
             payload = research_payload(routes, points)

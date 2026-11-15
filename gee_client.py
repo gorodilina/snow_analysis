@@ -124,13 +124,23 @@ def scene_image(satellite: str, bbox: list[float], day: date,
     return collection.map(lambda im: _prepare(im, satellite, mask_clouds)).mosaic()
 
 
+def count_interval_scenes(satellite: str, bbox: list[float], first: date,
+                          length: int) -> int:
+    """Number of individual GEE granules in the selected inclusive date range."""
+    if not 2 <= length <= 9:
+        raise ValueError("Длительность медианы должна составлять 2–9 дней.")
+    collection = _source_images(satellite, bbox, first, first + timedelta(days=length))
+    return int(collection.size().getInfo())
+
+
 def median_images(satellite: str, bbox: list[float], first: date,
-                  length: int) -> tuple[ee.Image, ee.Image, int]:
+                  length: int, count: int | None = None) -> tuple[ee.Image, ee.Image, int]:
     """Unmasked and cloud-masked median composites built from the SAME scenes."""
     if not 2 <= length <= 9:
         raise ValueError("Длительность медианы должна составлять 2–9 дней.")
     collection = _source_images(satellite, bbox, first, first + timedelta(days=length))
-    count = collection.size().getInfo()
+    if count is None:
+        count = int(collection.size().getInfo())
     if count == 0:
         raise ValueError("В выбранном интервале нет спутниковых сцен.")
     raw = collection.map(lambda im: _prepare(im, satellite, False)).median()

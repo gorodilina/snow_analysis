@@ -205,9 +205,10 @@ def build_tile_layers(image: ee.Image, bbox: list[float], day: date,
             "visible": False,
         },
     ]
-    ndsi = image.normalizedDifference(["green", "swir"])
-    valid = image.select("green").mask().And(image.select("swir").mask())
-    snow = ndsi.gte(0.4).And(image.select("green").gt(0.1)).toByte().updateMask(valid)
+    # Snow boundary uses cloud-masked reflectance even when the displayed image is unmasked.
+    ndsi = masked_image.normalizedDifference(["green", "swir"])
+    valid = masked_image.select("green").mask().And(masked_image.select("swir").mask())
+    snow = ndsi.gte(0.4).And(masked_image.select("green").gt(0.1)).toByte().updateMask(valid)
     edge = (snow.focalMax(1).neq(snow.focalMin(1))
             .updateMask(valid.focalMin(1)).selfMask().clip(area))
     layers.append({

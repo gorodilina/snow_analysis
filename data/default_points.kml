@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+	<Document>
+		<name>Локальные препятствия</name>
+		<Placemark>
+			<name>пер. Чара (н/к)</name>
+			<Point>
+				<coordinates>47.246514,41.954816,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Вирарик Верхний. (1А*)</name>
+			<Point>
+				<coordinates>47.129677,41.890121,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Какыту Ю. (1А?)</name>
+			<Point>
+				<coordinates>47.165618,41.916707,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Трехледниковый В. (1Б?)</name>
+			<Point>
+				<coordinates>47.092297,41.896429,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Можай (1А)</name>
+			<Point>
+				<coordinates>46.993742,41.928380,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Можай Ложный (1А)</name>
+			<Point>
+				<coordinates>46.995824,41.931684,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Можай-Нуккура (1А)</name>
+			<Point>
+				<coordinates>46.972413,41.941211,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Усмаркал (н/к)</name>
+			<Point>
+				<coordinates>46.635249,42.132356,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Матлаб (1Б?)</name>
+			<Point>
+				<coordinates>46.556735,42.191172,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>в. Матлаб</name>
+			<Point>
+				<coordinates>46.564718,42.191773,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Квенишор-Абасипаж (1Б?)</name>
+			<Point>
+				<coordinates>46.536973,42.226856,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Квенишор-Мазадинка</name>
+			<Point>
+				<coordinates>46.533175,42.219024,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>в. Бежуда</name>
+			<Point>
+				<coordinates>46.491375,42.234945,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Гарта (1А?)</name>
+			<Point>
+				<coordinates>46.361020,42.282710,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>в. Аддала-Шухгельмеэр (1Б)</name>
+			<Point>
+				<coordinates>46.250556,42.339895,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Нуккура В. (ист.)</name>
+			<Point>
+				<coordinates>46.952544,41.936190,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Бурхиль-Чаан</name>
+			<Point>
+				<coordinates>46.871627,41.874349,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Бабаку С. (1Б)</name>
+			<Point>
+				<coordinates>47.081290,41.915484,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Балиал В. (1Б)</name>
+			<Point>
+				<coordinates>47.040885,41.907845,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Балиал З. (2А)</name>
+			<Point>
+				<coordinates>47.023118,41.911020,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>мн9</name>
+			<Point>
+				<coordinates>46.747559,41.986187,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Хахабругуна (1А?)</name>
+			<Point>
+				<coordinates>46.557444,42.203918,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>в. Балиал (1Б)</name>
+			<Point>
+				<coordinates>47.031020,41.911456,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Хашхарва Ю. (2А)</name>
+			<Point>
+				<coordinates>46.872785,41.892905,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Ойс (1Б)</name>
+			<Point>
+				<coordinates>46.813087,41.895198,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Колоросоль (1А)</name>
+			<Point>
+				<coordinates>46.658129,42.046909,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Ахвах (2А)</name>
+			<Point>
+				<coordinates>46.284370,42.354516,0</coordinates>
+			</Point>
+		</Placemark>
+		<Placemark>
+			<name>пер. Ижена (1Б)</name>
+			<Point>
+				<coordinates>46.272268,42.358354,0</coordinates>
+			</Point>
+		</Placemark>
+	</Document>
+	</kml>

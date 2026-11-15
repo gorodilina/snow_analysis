@@ -1,4 +1,4 @@
-"""Streamlit frontend for Dagestan satellite scene exploration."""
+"""Streamlit frontend for snow conditions and satellite scene analysis."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ import streamlit.components.v1 as components
 from geo_utils import GeoInputError, read_geo, search_geometry
 from gee_client import (
     EarthEngineUnavailable, SENTINEL, LANDSAT,
-    initialize_ee, list_month_scenes, scene_image, median_image, build_tile_layers,
+    initialize_ee, list_month_scenes, scene_image, median_images, build_tile_layers,
 )
 from map_builder import map_html
+from google_terrain import get_google_terrain
 
 ROOT = Path(__file__).resolve().parent
 MONTHS = {
@@ -25,7 +26,7 @@ MONTHS = {
     9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь',
 }
 
-st.set_page_config(page_title='Дагестан · Снимки и снег', page_icon='🏔️', layout='wide')
+st.set_page_config(page_title='Анализ снежной обстановки', page_icon='🏔️', layout='wide')
 st.markdown('''<style>
 .block-container{padding-top:1.3rem;padding-bottom:1rem;max-width:none}
 [data-testid="stSidebar"]{min-width:335px}
@@ -53,6 +54,11 @@ def cached_scenes(satellite: str, bbox: tuple[float, ...], year: int, month: int
     return list_month_scenes(satellite, list(bbox), year, month)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_google_terrain(api_key: str, bbox: tuple[float, ...]):
+    return get_google_terrain(api_key, list(bbox))
+
+
 def load_uploaded(filename: str, data: bytes):
     try:
         return read_geo(filename, data)
@@ -62,15 +68,14 @@ def load_uploaded(filename: str, data: bytes):
 
 
 with st.sidebar:
-    st.title('🏔️ Дагестан')
+    st.title('🏔️ Анализ снежной обстановки')
     st.caption('Спутниковые снимки, граница снега и изотермы вдоль маршрута')
-    st.subheader('1. Маршрут и препятствия')
+    st.subheader('1. Трек и точки')
     route_upload = st.file_uploader('Загрузить маршрут KML или GPX', type=['kml', 'gpx'], key='route_file')
     points_upload = st.file_uploader(
         'Дополнительные точки KML, GPX или CSV',
         type=['kml', 'gpx', 'csv'], accept_multiple_files=True, key='points_files'
     )
-    use_default_points = st.checkbox('Показывать 28 исходных препятствий', value=True)
 
     if 'manual_points' not in st.session_state:
         st.session_state['manual_points'] = []
@@ -97,13 +102,15 @@ with st.sidebar:
 # The app opens with the current supplied KML; uploading a route replaces it.
 if route_upload is None:
     routes, _ = read_geo('default_route.kml', (ROOT / 'data/default_route.kml').read_bytes())
-    route_status = 'Основной маршрут из проекта'
+    route_status = 'Пример трека из проекта'
 else:
     routes, _ = load_uploaded(route_upload.name, route_upload.getvalue())
     route_status = route_upload.name
 
 points = []
-if use_default_points:
+# Demo obstacles belong ONLY to the bundled example route.
+# They never appear on a user's uploaded GPX/KML track.
+if route_upload is None:
     _, original = read_geo('default_points.kml', (ROOT / 'data/default_points.kml').read_bytes())
     points += original
 for file in points_upload or []:
@@ -118,6 +125,7 @@ if st.session_state.get('last_geo_hash') != geo_hash:
     st.session_state.pop('image_caption', None)
     st.session_state.pop('scenes', None)
     st.session_state.pop('scene_query', None)
+    st.session_state.pop('median_scene_count', None)
 
 bbox = search_geometry(routes, points if not routes else [], buffer_m=4500)['bbox']
 
@@ -142,7 +150,7 @@ try:
 except (EarthEngineUnavailable, Exception) as exc:
     connection_error = str(exc)
 
-st.title('Спутниковые снимки и снег вдоль маршрута')
+st.title('Анализ снежной обстановки')
 st.caption(f'Маршрут: {route_status} · линий: {len(routes)} · точек: {len(points)}. '
            'Данные о снеге — NDSI; изотермы — модельная оценка ERA5-Land.')
 
@@ -180,8 +188,9 @@ with st.sidebar:
                         with st.spinner('Создаю картографические слои...'):
                             try:
                                 day = date.fromisoformat(chosen_day)
-                                image = scene_image(satellite, bbox, day, image_id)
-                                tiles, warnings = build_tile_layers(image, bbox, day)
+                                image = scene_image(satellite, bbox, day, image_id, mask_clouds=False)
+                                masked = scene_image(satellite, bbox, day, image_id, mask_clouds=True)
+                                tiles, warnings = build_tile_layers(image, bbox, day, masked)
                                 st.session_state['tiles'] = tiles
                                 st.session_state['image_caption'] = f'{satellite} · {chosen_day} · {choice}'
                                 st.session_state['warnings'] = warnings
@@ -200,29 +209,51 @@ with st.sidebar:
         if st.button('Показать медиану', disabled=not connected, type='primary', use_container_width=True):
             with st.spinner('Рассчитываю медианную мозаику...'):
                 try:
-                    image = median_image(satellite, bbox, median_start, median_length)
-                    tiles, warnings = build_tile_layers(image, bbox, median_start)
+                    image, masked, count = median_images(satellite, bbox, median_start, median_length)
+                    tiles, warnings = build_tile_layers(image, bbox, median_start, masked)
                     st.session_state['tiles'] = tiles
                     st.session_state['image_caption'] = (
-                        f'Медианная мозаика · {satellite} · {median_start}–{median_end} ({median_length} дней)'
+                        f'Медианная мозаика · {satellite} · {median_start}–{median_end} · '
+                        f'{count} сцен за {median_length} дней'
                     )
+                    st.session_state['median_scene_count'] = count
                     st.session_state['warnings'] = warnings
                 except Exception as exc:
                     st.error(f'Ошибка при расчёте медианы: {exc}')
 
     st.divider()
-    st.caption('Прозрачность, подписи, снежную границу и изотермы регулируйте в кнопке «Слои карты» внутри карты, справа вверху.')
+    st.caption('В «Слоях карты» можно переключать маску облаков, прозрачность, подписи точек и подложку.')
 
 if connection_error:
     with st.expander('Настройка доступа к Earth Engine'):
         st.write(connection_error)
         st.markdown('Укажите `GEE_PROJECT` и настройте авторизацию по инструкции из `README.md`. Секреты не загружайте на GitHub.')
 
-caption = st.session_state.get('image_caption', 'Маршрут без спутникового снимка')
+caption = st.session_state.get('image_caption', 'Трек без спутникового снимка')
 tiles = st.session_state.get('tiles', [])
-components.html(map_html(routes, points, tiles, caption), height=790, scrolling=False)
+
+# Optional: Google Maps Platform Maps Tiles API, not the Earth Engine key.
+google_terrain = None
+maps_api_key = setting('GOOGLE_MAPS_API_KEY', '')
+if maps_api_key:
+    try:
+        google_terrain = cached_google_terrain(
+            str(maps_api_key), tuple(round(float(v), 6) for v in bbox)
+        )
+    except Exception:
+        # Google basemap is optional; fall back gracefully to Esri and OSM.
+        google_terrain = None
+        st.info('Google Terrain недоступен: проверьте Maps Tile API, API-ключ и биллинг. '
+                'Остальные подложки работают без этого ключа.')
+
+components.html(
+    map_html(routes, points, tiles, caption, google_terrain=google_terrain),
+    height=790,
+    scrolling=False,
+)
 for warning in st.session_state.get('warnings', []):
     st.warning(warning)
 if tiles:
-    st.caption('Граница снега определена по NDSI и может включать ледники. Изотермы являются приближёнными: '
+    st.caption('Изначально показан снимок без маски облаков; её можно включить в «Слоях карты». '
+               'Граница снега определена по NDSI и может включать ледники. Изотермы являются приближёнными: '
                'ERA5-Land (~11 км) с фиксированной высотной поправкой 6 °C/км, а не измерения на перевалах.')

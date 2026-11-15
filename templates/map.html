@@ -30,7 +30,7 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
   <div id="layers-body">
     <b>Подложка</b><div id="basemaps"></div>
     <b>Данные</b><div id="overlays"></div>
-    <div style="margin-top:10px;color:#6b7280;font-size:11px">Прозрачность и подписи настраиваются здесь. Спутниковые сцены не смешиваются, если выбран один снимок.</div>
+    <div style="margin-top:10px;color:#6b7280;font-size:11px">Прозрачность, подписи и маска облаков настраиваются здесь. Режимы снимка с маской и без неё взаимоисключающие.</div>
   </div>
 </div>
 <div id="top-note"></div>
@@ -45,6 +45,21 @@ const bases = {
   'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,attribution:'© OpenStreetMap contributors'}),
   'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Imagery © Esri and providers'})
 };
+// The official Google Map Tiles API requires a paid Maps Platform project,
+// enabled Map Tiles API and a separately restricted GOOGLE_MAPS_API_KEY.
+// No unofficial Google tile URLs are used here.
+const googleConfig = config.googleTerrain || {};
+if (googleConfig.url) {
+  bases['Google Terrain'] = L.tileLayer(googleConfig.url, {
+    maxZoom:20,
+    attribution: '© Google Maps · ' + escGoogleAttribution(googleConfig.attribution || 'Map data © Google Maps')
+  });
+}
+function escGoogleAttribution(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  }[c]));
+}
 let currentBase = bases['Рельеф (Esri)'];
 currentBase.addTo(map);
 let baseErrorCount = 0;
@@ -96,7 +111,7 @@ for (const entry of config.tiles){
         ' · не удалось загрузить тайлы слоя «'+entry.name+'». Попробуйте обновить снимок.';
     }
   });
-  overlays.push({name:entry.name, layer:layer,visible:!!entry.visible, opacity:entry.opacity});
+  overlays.push({name:entry.name, layer:layer,visible:!!entry.visible, opacity:entry.opacity, role:entry.role||null, checkbox:null});
 }
 const basemapDiv=document.querySelector('#basemaps');
 for (const [name, layer] of Object.entries(bases)) {
@@ -105,13 +120,72 @@ for (const [name, layer] of Object.entries(bases)) {
   input.onchange=()=>{map.removeLayer(currentBase);currentBase=layer;currentBase.addTo(map);currentBase.bringToBack();};
   row.append(input, document.createTextNode(' '+name));basemapDiv.append(row);
 }
+if (!googleConfig.url) {
+  const note=document.createElement('div');
+  note.className='base-opt';
+  note.style.color='#808991';
+  note.textContent='Google Terrain (потребуется API-ключ)';
+  basemapDiv.append(note);
+}
+if (bases['Google Terrain']) {
+  bases['Google Terrain'].on('tileerror',()=>{
+    if(currentBase===bases['Google Terrain']) {
+      map.removeLayer(currentBase);
+      currentBase=bases['Рельеф (Esri)'];
+      currentBase.addTo(map);
+      const fallback=document.querySelector('input[name="base"][value="Рельеф (Esri)"]');
+      if(fallback) fallback.checked=true;
+      document.getElementById('top-note').textContent='Google Terrain: ошибка загрузки тайлов. Проверьте ключ и Maps Tile API.';
+    }
+  });
+}
+// Google Maps Map Tiles API requires viewport-specific data attribution.
+// Refresh it on each map move when supported by the provider.
+if (googleConfig.viewportUrl) {
+  let attributionTimer;
+  map.on('moveend', () => {
+    if (currentBase !== bases['Google Terrain']) return;
+    clearTimeout(attributionTimer);
+    attributionTimer=setTimeout(() => {
+      const b=map.getBounds();
+      const url=googleConfig.viewportUrl +
+        '&zoom='+map.getZoom() +
+        '&north='+b.getNorth()+'&south='+b.getSouth()+
+        '&east='+b.getEast()+'&west='+b.getWest();
+      fetch(url).then(x=>x.ok?x.json():Promise.reject(x.status))
+      .then(data=>{
+        const copyright=escGoogleAttribution(data.copyright || googleConfig.attribution || '');
+        bases['Google Terrain'].getAttribution=()=> '© Google Maps · '+copyright;
+        map.attributionControl._update();
+      }).catch(()=>{}); // Initial viewport copyright remains as fallback.
+    },350);
+  });
+}
 const overlayDiv=document.querySelector('#overlays');
-function addCheck(name, layer, initial, opacity){
+function addCheck(name, layer, initial, opacity, role){
   const wrapper=document.createElement('div');wrapper.className='layer-row';
   const label=document.createElement('label');label.className='layer-check';
   const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=initial;
   label.append(checkbox,document.createTextNode(name));wrapper.append(label);
-  checkbox.onchange=()=>checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
+  checkbox.onchange=()=>{
+    if (role==='raw'||role==='masked') {
+      if (checkbox.checked) {
+        // Exclusive image modes: masked transparency must reveal the basemap,
+        // not the unmasked RGB layer beneath it.
+        for (const other of overlays) {
+          if (other.role && other.role!==role) {
+            map.removeLayer(other.layer);
+            if (other.checkbox) other.checkbox.checked=false;
+          }
+        }
+        map.addLayer(layer);
+      } else {
+        map.removeLayer(layer);
+      }
+    } else {
+      checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
+    }
+  };
   if (opacity!==null && opacity!==undefined && layer.setOpacity){
     const line=document.createElement('div');line.className='opacity-row';
     const caption=document.createElement('span');caption.textContent='Прозрачность';
@@ -121,11 +195,14 @@ function addCheck(name, layer, initial, opacity){
     line.append(caption,slider,percent);wrapper.append(line);
   }
   overlayDiv.append(wrapper);
+  return checkbox;
 }
-for (const item of overlays) addCheck(item.name,item.layer,item.visible,item.opacity);
-addCheck('Основной маршрут',routeGroup,true,null);
-addCheck('Точки / препятствия',pointGroup,true,null);
-addCheck('Подписи точек',labelGroup,false,null);
+for (const item of overlays) {
+  item.checkbox=addCheck(item.name,item.layer,item.visible,item.opacity,item.role);
+}
+addCheck('Трек',routeGroup,true,null,null);
+addCheck('Точки / препятствия',pointGroup,true,null,null);
+addCheck('Подписи точек',labelGroup,false,null,null);
 const bounds=config.bounds;
 if (bounds && bounds.length===2) map.fitBounds(bounds,{padding:[32,32],maxZoom:13});
 else map.setView([42.18,46.72],10);

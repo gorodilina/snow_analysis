@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoLxgB+Z8xN60=" crossorigin="" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" onerror="this.onerror=null;this.removeAttribute('integrity');this.href='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css'" />
 <style>
 html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-system,Arial,sans-serif}
 #map{background:#e8eef0}
@@ -47,6 +47,22 @@ const bases = {
 };
 let currentBase = bases['Рельеф (Esri)'];
 currentBase.addTo(map);
+let baseErrorCount = 0;
+let switchedBaseAutomatically = false;
+currentBase.on('tileerror',()=>{
+  baseErrorCount++;
+  if (baseErrorCount>=4 && !switchedBaseAutomatically && map.hasLayer(currentBase)) {
+    switchedBaseAutomatically=true;
+    map.removeLayer(currentBase);
+    currentBase=bases['OpenStreetMap'];
+    currentBase.addTo(map);
+    currentBase.bringToBack();
+    const osmRadio = document.querySelector('input[name="base"][value="OpenStreetMap"]');
+    if (osmRadio) osmRadio.checked=true;
+    document.getElementById('top-note').textContent=(config.caption||'Карта')+
+      ' · рельефная подложка недоступна, автоматически включена OpenStreetMap';
+  }
+});
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 const routeGroup = L.featureGroup();
 for (const item of config.routes){
@@ -71,12 +87,21 @@ for (const entry of config.tiles){
   if (!entry.url) continue;
   const layer=L.tileLayer(entry.url, {opacity:entry.opacity, maxZoom:20,attribution:'© Google Earth Engine / Copernicus / USGS',crossOrigin:true});
   if (entry.visible) layer.addTo(map);
+  let errors=0;
+  layer.on('tileerror',()=>{
+    errors++;
+    if (errors===4) {
+      const note=document.getElementById('top-note');
+      note.textContent=(config.caption||'Спутниковый слой')+
+        ' · не удалось загрузить тайлы слоя «'+entry.name+'». Попробуйте обновить снимок.';
+    }
+  });
   overlays.push({name:entry.name, layer:layer,visible:!!entry.visible, opacity:entry.opacity});
 }
 const basemapDiv=document.querySelector('#basemaps');
 for (const [name, layer] of Object.entries(bases)) {
   const row=document.createElement('label');row.className='base-opt';
-  const input=document.createElement('input');input.type='radio';input.name='base';input.checked=name==='Рельеф (Esri)';
+  const input=document.createElement('input');input.type='radio';input.name='base';input.value=name;input.checked=name==='Рельеф (Esri)';
   input.onchange=()=>{map.removeLayer(currentBase);currentBase=layer;currentBase.addTo(map);currentBase.bringToBack();};
   row.append(input, document.createTextNode(' '+name));basemapDiv.append(row);
 }
@@ -110,7 +135,16 @@ document.getElementById('layers-head').onclick=()=>{
  document.getElementById('arrow').textContent=p.classList.contains('collapsed')?'▸':'▾';
 };
 // Resizing the containing Streamlit element does not require rebuilding the map.
-window.addEventListener('resize',()=>map.invalidateSize());
+// Streamlit can resize an iframe after the first layout pass.
+// A delayed invalidateSize keeps tile grids and vector overlays aligned.
+function refreshMapSize(){ map.invalidateSize({pan:false,animate:false}); }
+window.addEventListener('resize',refreshMapSize);
+window.requestAnimationFrame(refreshMapSize);
+window.setTimeout(refreshMapSize,250);
+window.setTimeout(refreshMapSize,1000);
+if (window.ResizeObserver) {
+  new ResizeObserver(refreshMapSize).observe(document.getElementById('map'));
+}
 </script>
 </body>
 </html>

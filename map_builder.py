@@ -8,10 +8,11 @@ TEMPLATE = Path(__file__).resolve().parent / 'templates' / 'map.html'
 
 
 def map_html(routes: list[dict], points: list[dict], tiles: list[dict] | None = None,
-             caption: str = '') -> str:
+             caption: str = '', google_terrain: dict | None = None) -> str:
     payload = json.dumps({
         'routes': routes, 'points': points, 'tiles': tiles or [],
         'bounds': bounding_box(routes, points), 'caption': caption,
+        'googleTerrain': google_terrain or {},
     }, ensure_ascii=False)
     # Never allow a user-provided object name to terminate the embedding script tag.
     payload = payload.replace('</', '<\\/')

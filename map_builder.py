@@ -11,7 +11,7 @@ def map_html(routes: list[dict], points: list[dict], tiles: list[dict] | None = 
              caption: str = '', google_terrain: dict | None = None) -> str:
     payload = json.dumps({
         'routes': routes, 'points': points, 'tiles': tiles or [],
-        'bounds': bounding_box(routes, points), 'caption': caption,
+        'bounds': bounding_box(routes, [] if routes else points), 'caption': caption,
         'googleTerrain': google_terrain or {},
     }, ensure_ascii=False)
     # Never allow a user-provided object name to terminate the embedding script tag.

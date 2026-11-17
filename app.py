@@ -100,8 +100,7 @@ def apply_research_payload(payload: dict):
         if isinstance(old_rgb, dict):
             old_overlays[st.session_state["image_layers"][0]["id"]] = old_rgb
     st.session_state["runtime_tiles"] = {}
-    st.session_state["analysis_tiles"] = []
-    st.session_state["analysis_cache_key"] = ""
+    st.session_state["analysis_tiles"] = {}
     st.session_state["image_caption"] = ""
     st.session_state["warnings"] = []
     ui = payload.get("ui") or {}
@@ -174,8 +173,7 @@ st.session_state.setdefault("notes", [])
 st.session_state.setdefault("map_state", {})
 st.session_state.setdefault("image_layers", [])
 st.session_state.setdefault("runtime_tiles", {})
-st.session_state.setdefault("analysis_tiles", [])
-st.session_state.setdefault("analysis_cache_key", "")
+st.session_state.setdefault("analysis_tiles", {})
 st.session_state.setdefault("warnings", [])
 
 with st.sidebar:
@@ -268,8 +266,7 @@ if st.session_state.get("last_geo_hash") != geo_hash:
     st.session_state.pop("scene_query", None)
     # Keep the layer catalogue; refresh its temporary tiles for a new ROI.
     st.session_state["runtime_tiles"] = {}
-    st.session_state["analysis_tiles"] = []
-    st.session_state["analysis_cache_key"] = ""
+    st.session_state["analysis_tiles"] = {}
 
 bbox = search_geometry(routes, points if not routes else [], buffer_m=4500)["bbox"]
 
@@ -295,50 +292,49 @@ except Exception as exc:
     connection_error = str(exc)
 
 def add_image_layer(spec: dict, region: list[float]) -> None:
-    """Create one GEE tile, then append the new independent image."""
+    """Append one independent RGB layer; imagery never contains cloud masking."""
     tile = image_rgb_tile(spec, region)
     st.session_state["image_layers"].append(spec)
     st.session_state["runtime_tiles"][spec["id"]] = tile
-    # Latest image becomes the source for the global snow/temperature overlays.
-    st.session_state["analysis_cache_key"] = ""
 
 
 def current_tile_layers(region: list[float], is_connected: bool) -> list[dict]:
-    """Recreate expiring GEE URLs on load without storing raster bytes in Supabase."""
+    """Rebuild ephemeral URLs; overlays belong to each source image."""
     if not is_connected:
         return []
     catalogue = st.session_state["image_layers"]
     runtime = st.session_state["runtime_tiles"]
+    analysis_cache = st.session_state["analysis_tiles"]
+    contours_visible = bool(st.session_state.get("map_state", {}).get("analysis_visible", False))
+    tiles = []
     for spec in catalogue:
-        if spec["id"] in runtime:
-            continue
-        try:
-            runtime[spec["id"]] = image_rgb_tile(spec, region)
-        except Exception as exc:
-            st.warning(f"Слой «{spec['name']}» пока недоступен: {exc}")
-    active_ids = {spec["id"] for spec in catalogue}
-    for obsolete in list(runtime):
-        if obsolete not in active_ids:
-            del runtime[obsolete]
-    if not catalogue:
-        st.session_state["analysis_tiles"] = []
-        st.session_state["analysis_cache_key"] = ""
-        return []
-
-    latest = catalogue[-1]
-    analysis_key = latest["id"] + ":" + ",".join(map(str, region))
-    if st.session_state.get("analysis_cache_key") != analysis_key:
-        try:
-            analysis, warnings = analysis_overlay_tiles(latest, region)
-            st.session_state["analysis_tiles"] = analysis
-            st.session_state["warnings"] = warnings
-        except Exception as exc:
-            st.session_state["analysis_tiles"] = []
-            st.session_state["warnings"] = [f"Анализ снега не загружен: {exc}"]
-        st.session_state["analysis_cache_key"] = analysis_key
-    return [runtime[spec["id"]] for spec in catalogue if spec["id"] in runtime] + (
-        st.session_state["analysis_tiles"]
-    )
+        ident = spec["id"]
+        if ident not in runtime:
+            try:
+                runtime[ident] = image_rgb_tile(spec, region)
+            except Exception as exc:
+                st.warning(f"Снимок «{spec['name']}» пока недоступен: {exc}")
+                continue
+        tiles.append(runtime[ident])
+        if contours_visible:
+            if ident not in analysis_cache:
+                try:
+                    overlays, warnings = analysis_overlay_tiles(spec, region)
+                    analysis_cache[ident] = overlays
+                    for warning in warnings:
+                        st.warning(f"{spec['name']}: {warning}")
+                except Exception as exc:
+                    st.warning(f"Контуры «{spec['name']}» пока недоступны: {exc}")
+                    analysis_cache[ident] = []
+            tiles.extend(analysis_cache[ident])
+    valid_ids = {spec["id"] for spec in catalogue}
+    for key in list(runtime):
+        if key not in valid_ids:
+            del runtime[key]
+    for key in list(analysis_cache):
+        if key not in valid_ids:
+            del analysis_cache[key]
+    return tiles
 
 
 st.title("Анализ снежной обстановки")
@@ -503,8 +499,7 @@ with st.sidebar:
     if st.button("Обновить спутниковые тайлы", disabled=not connected,
                  use_container_width=True):
         st.session_state["runtime_tiles"] = {}
-        st.session_state["analysis_cache_key"] = ""
-        st.session_state["analysis_tiles"] = []
+        st.session_state["analysis_tiles"] = {}
         st.rerun()
     try:
         st.download_button(
@@ -519,8 +514,9 @@ with st.sidebar:
     except (SessionStorageError, ValueError, TypeError) as exc:
         st.warning(f"Экспорт проекта недоступен: {exc}")
     st.caption(
-        "Снимки накладываются друг на друга, новейший выше. "
-        "Граница снега и изотермы относятся к последнему добавленному снимку."
+        "Снимки накладываются друг на друга, новые выше старых. "
+        "Граница снега и изотермы рассчитываются отдельно для каждого снимка "
+        "и включаются общим переключателем в слоях карты."
     )
 
 if connection_error:
@@ -530,7 +526,7 @@ if connection_error:
 
 caption = (
     f"Слоёв спутниковых снимков: {len(st.session_state['image_layers'])}."
-    + (f" Снег и изотермы: {st.session_state['image_layers'][-1]['name']}."
+    + (" Для каждого снимка доступны собственные граница снега и изотермы."
        if st.session_state["image_layers"] else
        " Добавьте снимок или медиану в панели слева.")
 )
@@ -573,8 +569,7 @@ if isinstance(map_event, dict):
             if len(st.session_state["image_layers"]) != old_count:
                 st.session_state["last_deleted_image_id"] = ident
                 st.session_state["runtime_tiles"].pop(ident, None)
-                st.session_state["analysis_cache_key"] = ""
-                st.session_state["analysis_tiles"] = []
+                st.session_state["analysis_tiles"].pop(ident, None)
                 st.session_state.get("map_state", {}).get("overlays", {}).pop(ident, None)
                 st.rerun()
 
@@ -583,9 +578,9 @@ for warning in st.session_state.get("warnings", []):
 if tiles:
     st.caption(
         "Каждый снимок отображается без облачной маски. "
-        "Граница снега по NDSI может включать ледники и вычисляется "
-        "с маской облаков по последнему добавленному снимку. "
-        "Изотермы ERA5-Land — модельная оценка."
+        "Для каждого снимка граница снега рассчитывается из облачно-маскированных "
+        "данных NDSI (может включать ледники), а изотермы ERA5-Land — модельная оценка. "
+        "Оба вида контуров включаются и скрываются одновременно."
     )
 
 # Autosave if the state has actually changed. No credentials or tile URLs

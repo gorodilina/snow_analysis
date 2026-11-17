@@ -503,66 +503,210 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    st.subheader("5. Сохранение по ссылке")
+    st.subheader("5. Галерея выбранных областей")
+    st.caption("На карте нажмите «Выделить область», обведите фрагмент и выберите «В галерею».")
+    gallery_items = st.session_state["gallery"]
+    st.caption(f"Сохранённых изображений: {len(gallery_items)}.")
+    if gallery_items:
+        selected_id = st.selectbox(
+            "Просмотр фотографии",
+            [item["id"] for item in gallery_items],
+            format_func=lambda ident: next(
+                (f"{i+1}. {item['title'] or 'Без названия'}"
+                 for i, item in enumerate(gallery_items) if item["id"] == ident),
+                ident,
+            ),
+            key="gallery_selected_id",
+        )
+        gallery_item = next(i for i in gallery_items if i["id"] == selected_id)
+        try:
+            st.image(gallery_image_bytes(gallery_item), use_container_width=True)
+        except SessionStorageError as exc:
+            st.warning(str(exc))
+        gallery_item["title"] = st.text_input(
+            "Название изображения (необязательно)",
+            value=gallery_item["title"],
+            max_chars=150,
+            key="gallery_title_" + selected_id,
+        )
+        gallery_item["note"] = st.text_area(
+            "Заметка к изображению (необязательно)",
+            value=gallery_item["note"],
+            max_chars=3000,
+            key="gallery_note_" + selected_id,
+            height=80,
+        )
+        if st.button("Удалить это изображение", use_container_width=True):
+            try:
+                if gallery_item.get("storage_key") and gallery_store:
+                    gallery_store.remove(gallery_item["storage_key"])
+                st.session_state["gallery"] = [
+                    item for item in gallery_items if item["id"] != selected_id
+                ]
+                st.session_state["gallery_blobs"].pop(selected_id, None)
+                st.session_state["gallery_export_bytes"] = None
+                st.rerun()
+            except SessionStorageError as exc:
+                st.error(f"Не удалось удалить изображение: {exc}")
+        export_mode = st.radio(
+            "Экспорт галереи",
+            ["ZIP — только PNG/JPG", "PDF — изображения, названия и заметки"],
+            key="gallery_export_mode",
+        )
+        if st.button("Подготовить выгрузку галереи", use_container_width=True):
+            try:
+                pics = collect_gallery_images()
+                if export_mode.startswith("ZIP"):
+                    result = build_gallery_zip(gallery_items, pics)
+                    ext, mime = "zip", "application/zip"
+                else:
+                    result = build_gallery_pdf(
+                        gallery_items, pics, st.session_state["research_name"]
+                    )
+                    ext, mime = "pdf", "application/pdf"
+                st.session_state["gallery_export_bytes"] = (ext, mime, result)
+            except (SessionStorageError, OSError, ValueError) as exc:
+                st.error(f"Не удалось экспортировать галерею: {exc}")
+        prepared = st.session_state.get("gallery_export_bytes")
+        if prepared and (prepared[0] == "zip") == export_mode.startswith("ZIP"):
+            st.download_button(
+                "Скачать галерею ." + prepared[0].upper(),
+                data=prepared[2],
+                file_name="snow-gallery." + prepared[0],
+                mime=prepared[1],
+                use_container_width=True,
+            )
+    else:
+        st.caption("Пока пусто. Можно сохранять несколько областей карты.")
+
+    st.divider()
+    st.subheader("6. Сохранение исследования по ссылке")
     st.text_input("Название исследования", key="research_name", max_chars=120)
     current_token = st.session_state.get("active_token")
     if not store:
         st.caption(
-            "Чтобы сохранить исследование по ссылке, настройте "
-            "SUPABASE_URL и SUPABASE_SECRET_KEY в Secrets. "
-            "До этого текущая карта работает без сохранения на сервере."
+            "Для постоянной ссылки нужны SUPABASE_URL и SUPABASE_SECRET_KEY в Secrets. "
+            "Экспорт ZIP/PDF работает и без подключения базы."
         )
     elif current_token:
-        st.caption("Автосохранение включено. Любой, у кого есть ссылка, может редактировать исследование.")
+        st.caption("Автосохранение включено. Владелец ссылки может редактировать исследование.")
         st.code(share_link(current_token), language=None)
+        if any(not p.get("storage_key") for p in gallery_items):
+            if st.button("Повторить загрузку изображений в Supabase", use_container_width=True):
+                try:
+                    sync_gallery_to_cloud(current_token)
+                    st.rerun()
+                except SessionStorageError as exc:
+                    st.error(f"Не удалось сохранить галерею: {exc}")
         try:
             st.link_button(
                 "Создать другое исследование",
-                st.context.url,
-                use_container_width=True,
+                st.context.url, use_container_width=True,
             )
         except (AttributeError, RuntimeError):
-            st.caption("Для нового исследования откройте адрес приложения без ?session=…")
+            st.caption("Откройте адрес приложения без ?session=… для нового исследования.")
     elif st.button("Сохранить и получить ссылку", type="primary", use_container_width=True):
         try:
-            payload = research_payload(routes, points)
-            token = store.create(payload)
+            token = store.create(research_payload(routes, points))
             st.session_state["active_token"] = token
             st.session_state["loaded_map_revision"] = token
+            if gallery_items:
+                sync_gallery_to_cloud(token)
+            final_payload = research_payload(routes, points)
+            store.save(token, final_payload)
             st.session_state["last_saved_digest"] = hashlib.sha256(
-                json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+                json.dumps(final_payload, ensure_ascii=False, sort_keys=True).encode()
             ).hexdigest()
             st.query_params["session"] = token
-            st.success("Ссылка создана. Скопируйте адрес исследования ниже.")
+            st.success("Ссылка создана. Фото галереи сохранены в приватном хранилище.")
             st.code(share_link(token), language=None)
         except (SessionStorageError, ValueError) as exc:
-            st.error(f"Не удалось сохранить исследование: {exc}")
+            st.error(f"Не удалось полностью сохранить исследование: {exc}")
+
+    with st.expander("Резервная копия всего исследования (ZIP)"):
+        st.caption("Отдельно от экспорта галереи: все треки, слои, заметки и фотографии.")
+        if st.button("Подготовить резервную копию", use_container_width=True):
+            try:
+                st.session_state["project_backup_bytes"] = build_project_zip(
+                    research_payload(routes, points), collect_gallery_images()
+                )
+            except (SessionStorageError, ValueError) as exc:
+                st.error(f"Не удалось создать резервный ZIP: {exc}")
+        if st.session_state.get("project_backup_bytes"):
+            st.download_button(
+                "Скачать резервную копию",
+                data=st.session_state["project_backup_bytes"],
+                file_name=safe_export_filename(st.session_state["research_name"]),
+                mime="application/zip",
+                use_container_width=True,
+            )
+
+    st.divider()
+    st.subheader("7. Геопривязанный GeoTIFF")
+    available_areas = []
+    current_area = st.session_state.get("map_state", {}).get("selection_bounds")
+    if current_area:
+        available_areas.append(("current", "Последняя выделенная область", current_area))
+    available_areas += [
+        (item["id"], f"Галерея: {item['title'] or str(i+1)}", item["bounds"])
+        for i, item in enumerate(gallery_items)
+    ]
+    if available_areas and st.session_state["image_layers"]:
+        area_choice = st.selectbox(
+            "Географическая область",
+            range(len(available_areas)),
+            format_func=lambda idx: available_areas[idx][1],
+            key="geotiff_area",
+        )
+        source_choice = st.selectbox(
+            "Исходный спутниковый слой",
+            range(len(st.session_state["image_layers"])),
+            format_func=lambda idx: st.session_state["image_layers"][idx]["name"],
+            key="geotiff_layer",
+        )
+        source_spec = st.session_state["image_layers"][source_choice]
+        scale = st.number_input(
+            "Размер пикселя, м",
+            min_value=10, max_value=200, step=10,
+            value=suggested_scale(source_spec["satellite"]),
+            key="geotiff_scale",
+        )
+        st.caption("GeoTIFF содержит 4 канала отражения: red, green, blue, swir. "
+                   "Это НЕ скриншот и не включает подложку, трек и нарисованные линии.")
+        if st.button("Подготовить GeoTIFF", disabled=not connected,
+                     use_container_width=True):
+            with st.spinner("Выгружаю геопривязанный фрагмент из GEE..."):
+                try:
+                    st.session_state["geotiff_bytes"] = export_geotiff(
+                        source_spec, available_areas[area_choice][2], int(scale)
+                    )
+                    st.session_state["geotiff_name"] = (
+                        source_spec["id"] + "_" + str(scale) + "m.tif"
+                    )
+                except (SessionStorageError, Exception) as exc:
+                    st.error(f"Не удалось создать GeoTIFF: {exc}")
+        if st.session_state.get("geotiff_bytes"):
+            st.download_button(
+                "Скачать GeoTIFF",
+                data=st.session_state["geotiff_bytes"],
+                file_name=st.session_state.get("geotiff_name", "snow_area.tif"),
+                mime="image/tiff",
+                use_container_width=True,
+            )
+    else:
+        st.caption("Выделите область на карте и добавьте хотя бы один снимок.")
 
     st.divider()
     st.caption(f"Открыто спутниковых слоёв: {len(st.session_state['image_layers'])}. "
-               "Удаление, прозрачность и видимость — в «Слоях карты».")
+               "Их видимость, прозрачность и удаление — в «Слоях карты».")
     if st.button("Обновить спутниковые тайлы", disabled=not connected,
                  use_container_width=True):
         st.session_state["runtime_tiles"] = {}
         st.session_state["analysis_tiles"] = {}
         st.rerun()
-    try:
-        st.download_button(
-            "Скачать исследование (ZIP)",
-            data=build_project_zip(research_payload(routes, points)),
-            file_name=safe_export_filename(st.session_state.get("research_name", "")),
-            mime="application/zip",
-            use_container_width=True,
-            help="Сохраняются все треки, точки, заметки, снимки и настройки. "
-                 "Растровые файлы не включаются.",
-        )
-    except (SessionStorageError, ValueError, TypeError) as exc:
-        st.warning(f"Экспорт проекта недоступен: {exc}")
-    st.caption(
-        "Снимки накладываются друг на друга, новые выше старых. "
-        "Граница снега и изотермы рассчитываются отдельно для каждого снимка "
-        "и включаются общим переключателем в слоях карты."
-    )
+    st.caption("Для каждого снимка отдельно рассчитаны граница снега и изотермы. "
+               "Все контуры включаются общим переключателем и повторяют прозрачность "
+               "соответствующего спутникового слоя.")
 
 if connection_error:
     with st.expander("Настройка доступа к Earth Engine"):

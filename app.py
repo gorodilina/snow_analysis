@@ -89,10 +89,16 @@ def apply_research_payload(payload: dict):
     st.session_state["map_state"] = payload.get("map_state") or {}
     # Migrate sessions created before multiple independent imagery layers.
     existing_layers = payload.get("layers")
+    use_legacy = not existing_layers and isinstance(payload.get("selection"), dict)
     st.session_state["image_layers"] = normalize_layers(
-        existing_layers if isinstance(existing_layers, list)
-        else migrate_legacy_selection(payload.get("selection"))
+        migrate_legacy_selection(payload["selection"]) if use_legacy
+        else (existing_layers if isinstance(existing_layers, list) else [])
     )
+    if use_legacy and st.session_state["image_layers"]:
+        old_overlays = st.session_state["map_state"].get("overlays", {})
+        old_rgb = old_overlays.get("Снимок без маски") or old_overlays.get("Спутниковый снимок")
+        if isinstance(old_rgb, dict):
+            old_overlays[st.session_state["image_layers"][0]["id"]] = old_rgb
     st.session_state["runtime_tiles"] = {}
     st.session_state["analysis_tiles"] = []
     st.session_state["analysis_cache_key"] = ""

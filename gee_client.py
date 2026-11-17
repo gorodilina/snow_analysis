@@ -186,7 +186,7 @@ def image_rgb_tile(spec: dict, bbox: list[float]) -> dict:
 
 
 def analysis_overlay_tiles(spec: dict, bbox: list[float]) -> tuple[list[dict], list[str]]:
-    """Snow outline of the newest image, plus ERA5-derived contours above all RGBs."""
+    """Snow outline and ERA5 isolines for THIS image, attached to its layer ID."""
     day = date.fromisoformat(spec["day"] if spec["kind"] == "scene" else spec["start"])
     masked = image_from_layer(spec, bbox, mask_clouds=True)
     area = _roi(bbox)
@@ -196,8 +196,9 @@ def analysis_overlay_tiles(spec: dict, bbox: list[float]) -> tuple[list[dict], l
     edge = (snow.focalMax(1).neq(snow.focalMin(1))
             .updateMask(valid.focalMin(1)).selfMask().clip(area))
     result = [{
-        "id": "snow-outline",
-        "name": "Граница снега (NDSI)",
+        "id": spec["id"] + ":snow",
+        "source_id": spec["id"],
+        "name": "Граница снега · " + spec["name"],
         "role": "snow",
         "url": _tile_url(edge, {"palette": ["00ffff"]}),
         "opacity": 0.95,
@@ -207,7 +208,8 @@ def analysis_overlay_tiles(spec: dict, bbox: list[float]) -> tuple[list[dict], l
     try:
         for item in _temperature_layers(bbox, day):
             item["role"] = "isotherm"
-            item["id"] = "iso-" + item["name"].split(" ")[1].replace("+", "plus")
+            item["source_id"] = spec["id"]
+            item["id"] = spec["id"] + ":iso:" + item["name"].split(" ")[1].replace("+", "plus")
             result.append(item)
     except Exception as exc:
         warnings.append(f"Изотермы ERA5-Land недоступны: {exc}")

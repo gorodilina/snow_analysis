@@ -23,6 +23,12 @@ from project_layers import (
 from project_archive import (
     build_project_zip, import_project_zip, safe_export_filename,
 )
+from gallery import (
+    GalleryStorage, SessionStorageError as GalleryError, build_gallery_zip,
+    build_gallery_pdf, new_gallery_item, normalize_gallery, read_snapshot,
+    validate_bounds,
+)
+from geo_export import export_geotiff, suggested_scale
 from session_store import SessionStorageError, SessionStore, valid_token
 
 ROOT = Path(__file__).resolve().parent
@@ -83,6 +89,10 @@ def apply_research_payload(payload: dict):
     st.session_state["saved_routes"] = payload.get("routes") or []
     st.session_state["saved_points"] = payload.get("points") or []
     st.session_state["notes"] = payload.get("notes") or []
+    st.session_state["gallery"] = normalize_gallery(payload.get("gallery") or [])
+    st.session_state["gallery_blobs"] = payload.get("_gallery_media") or {}
+    st.session_state["gallery_export_bytes"] = None
+    st.session_state["geotiff_bytes"] = None
     st.session_state["manual_points"] = []
     # Rotate the uploader key instead of writing into a non-settable file widget.
     st.session_state["geo_uploader_revision"] = st.session_state.get("geo_uploader_revision", 0) + 1
@@ -124,6 +134,7 @@ def research_payload(routes: list[dict], points: list[dict]) -> dict:
         "routes": routes,
         "points": points,
         "notes": st.session_state.get("notes", []),
+        "gallery": normalize_gallery(st.session_state.get("gallery", [])),
         "ui": ui,
         "layers": normalize_layers(st.session_state.get("image_layers", [])),
         "map_state": st.session_state.get("map_state", {}),
@@ -139,10 +150,11 @@ def share_link(token: str) -> str:
 
 
 # Persistent sessions: configured with server-side Supabase secrets.
-store = None
+store, gallery_store = None, None
 if setting("SUPABASE_URL", "") and setting("SUPABASE_SECRET_KEY", ""):
     try:
         store = SessionStore(setting("SUPABASE_URL"), setting("SUPABASE_SECRET_KEY"))
+        gallery_store = GalleryStorage(setting("SUPABASE_URL"), setting("SUPABASE_SECRET_KEY"))
     except SessionStorageError as exc:
         st.warning(f"Хранилище исследований: {exc}")
 
@@ -170,11 +182,44 @@ if requested_token and requested_token != st.session_state.get("active_token"):
 st.session_state.setdefault("research_name", "Новое исследование")
 st.session_state.setdefault("manual_points", [])
 st.session_state.setdefault("notes", [])
+st.session_state.setdefault("gallery", [])
+st.session_state.setdefault("gallery_blobs", {})
+st.session_state.setdefault("gallery_export_bytes", None)
+st.session_state.setdefault("geotiff_bytes", None)
 st.session_state.setdefault("map_state", {})
 st.session_state.setdefault("image_layers", [])
 st.session_state.setdefault("runtime_tiles", {})
 st.session_state.setdefault("analysis_tiles", {})
 st.session_state.setdefault("warnings", [])
+
+def gallery_image_bytes(item: dict) -> bytes:
+    ident = item["id"]
+    local = st.session_state["gallery_blobs"].get(ident)
+    if local is not None:
+        return local
+    if not item.get("storage_key") or not gallery_store:
+        raise SessionStorageError("Изображение недоступно. Восстановите проект из ZIP.")
+    data = gallery_store.get(item["storage_key"])
+    st.session_state["gallery_blobs"][ident] = data
+    return data
+
+
+def collect_gallery_images() -> dict[str, bytes]:
+    return {item["id"]: gallery_image_bytes(item) for item in st.session_state["gallery"]}
+
+
+def sync_gallery_to_cloud(token: str) -> None:
+    """Upload draft images before saving metadata to the shareable session."""
+    if not gallery_store:
+        raise SessionStorageError("Не подключено хранилище галереи.")
+    for item in st.session_state["gallery"]:
+        if item.get("storage_key"):
+            continue
+        blob = st.session_state["gallery_blobs"].get(item["id"])
+        if blob is None:
+            raise SessionStorageError("Не найден локальный файл галереи.")
+        item["storage_key"] = gallery_store.put(token, item, blob)
+
 
 with st.sidebar:
     st.title("🏔️ Анализ снежной обстановки")

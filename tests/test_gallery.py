@@ -105,3 +105,77 @@ def test_geotiff_grid_is_bounded():
     assert suggested_scale("Landsat 8/9") == 30
     w, h = estimate_grid([46, 42, 46.02, 42.01], 20)
     assert 70 < w < 100 and 50 < h < 65
+
+
+def test_streamlit_recovers_stale_gallery_selection_after_deletion_or_restore():
+    """Opening a different gallery must not break the active photo."""
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(
+        Path(__file__).resolve().parents[1] / "app.py", default_timeout=30
+    ).run()
+    assert not at.exception
+
+    first, first_bytes = example()
+    at.session_state["gallery"] = [first]
+    at.session_state["gallery_blobs"] = {first["id"]: first_bytes}
+    at.session_state["gallery_active_id"] = "gal_00000000000000000000"
+    at.run()
+    assert not at.exception
+    assert at.session_state["gallery_active_id"] == first["id"]
+
+    # Gallery view becomes empty, then a completely different photo arrives.
+    at.session_state["gallery"] = []
+    at.run()
+    assert not at.exception
+
+    another, another_bytes = example()
+    at.session_state["gallery"] = [another]
+    at.session_state["gallery_blobs"] = {another["id"]: another_bytes}
+    at.session_state["gallery_active_id"] = first["id"]
+    at.run()
+    assert not at.exception
+    assert at.session_state["gallery_active_id"] == another["id"]
+
+
+def test_two_photo_captures_can_be_confirmed_and_preserved():
+    """Regression: adding a second screenshot must not replace the first."""
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(
+        Path(__file__).resolve().parents[1] / "app.py", default_timeout=30
+    ).run()
+    assert not at.exception
+    made = []
+    for _ in range(2):
+        photo, blob = example()
+        photo["title"] = "S2 · 15.06.25 · день"
+        at.session_state["pending_photo"] = {"item": photo, "data": blob}
+        at.run()
+        assert not at.exception
+        matching = [b for b in at.button if b.label == "Сохранить изображение в галерею"]
+        assert len(matching) == 1
+        matching[0].click()
+        at.run()
+        assert not at.exception
+        made.append(photo["id"])
+        assert [entry["id"] for entry in at.session_state["gallery"]] == made
+        assert at.session_state["pending_photo"] is None
+
+    assert len(at.session_state["gallery_blobs"]) == 2
+
+
+def test_gallery_titles_follow_visible_satellite_images():
+    from gallery import suggested_gallery_title
+    layers = [
+        {"id": "img_a", "name": "L8/9 · 01–05.06.25 · мед."},
+        {"id": "img_b", "name": "S2 · 15.06.25 08:31"},
+    ]
+    assert suggested_gallery_title(layers, {"overlays": {
+        "img_a": {"visible": False}, "img_b": {"visible": True},
+    }}) == "S2 · 15.06.25 08:31"
+    assert suggested_gallery_title(layers, {"overlays": {
+        "img_a": {"visible": True}, "img_b": {"visible": True},
+    }}) == "S2 · 15.06.25 08:31 + L8/9 · 01–05.06.25 · мед."

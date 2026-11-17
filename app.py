@@ -24,9 +24,8 @@ from project_archive import (
     build_project_zip, import_project_zip, safe_export_filename,
 )
 from gallery import (
-    GalleryStorage, SessionStorageError as GalleryError, build_gallery_zip,
-    build_gallery_pdf, new_gallery_item, normalize_gallery, read_snapshot,
-    validate_bounds,
+    GalleryStorage, build_gallery_zip, build_gallery_pdf, new_gallery_item,
+    normalize_gallery, read_snapshot, suggested_gallery_title, validate_bounds,
 )
 from geo_export import export_geotiff, suggested_scale
 from session_store import SessionStorageError, SessionStore, valid_token
@@ -92,6 +91,9 @@ def apply_research_payload(payload: dict):
     st.session_state["gallery"] = normalize_gallery(payload.get("gallery") or [])
     st.session_state["gallery_blobs"] = payload.get("_gallery_media") or {}
     st.session_state["gallery_export_bytes"] = None
+    st.session_state["pending_photo"] = None
+    st.session_state["gallery_active_id"] = None
+    st.session_state["gallery_page"] = 1
     st.session_state["geotiff_bytes"] = None
     st.session_state["manual_points"] = []
     # Rotate the uploader key instead of writing into a non-settable file widget.
@@ -185,6 +187,9 @@ st.session_state.setdefault("notes", [])
 st.session_state.setdefault("gallery", [])
 st.session_state.setdefault("gallery_blobs", {})
 st.session_state.setdefault("gallery_export_bytes", None)
+st.session_state.setdefault("pending_photo", None)
+st.session_state.setdefault("gallery_active_id", None)
+st.session_state.setdefault("gallery_page", 1)
 st.session_state.setdefault("geotiff_bytes", None)
 st.session_state.setdefault("map_state", {})
 st.session_state.setdefault("image_layers", [])
@@ -219,6 +224,155 @@ def sync_gallery_to_cloud(token: str) -> None:
         if blob is None:
             raise SessionStorageError("Не найден локальный файл галереи.")
         item["storage_key"] = gallery_store.put(token, item, blob)
+
+
+def render_pending_photo_form() -> None:
+    """Stage the screenshot first; let the user rename/comment BEFORE upload."""
+    pending = st.session_state.get("pending_photo")
+    if not pending:
+        return
+    item = pending["item"]
+    with st.container(border=True):
+        st.subheader("Новый снимок карты — добавление в галерею")
+        st.caption("Название уже заполнено по спутниковому слою. Можно изменить его и добавить заметку.")
+        st.image(pending["data"], width=380)
+        with st.form("new_gallery_photo_" + item["id"]):
+            title = st.text_input("Название", value=item["title"], max_chars=150)
+            note = st.text_area("Заметка (необязательно)", value="", max_chars=3000, height=90)
+            save_photo = st.form_submit_button(
+                "Сохранить изображение в галерею", type="primary",
+                use_container_width=True,
+            )
+        if save_photo:
+            item["title"] = title.strip() or item["title"]
+            item["note"] = note.strip()
+            token = st.session_state.get("active_token")
+            if token and gallery_store:
+                try:
+                    item["storage_key"] = gallery_store.put(token, item, pending["data"])
+                except SessionStorageError as exc:
+                    st.warning(
+                        f"Изображение пока хранится только в текущей сессии: {exc}"
+                    )
+            st.session_state["gallery_blobs"][item["id"]] = pending["data"]
+            st.session_state["gallery"].append(item)
+            st.session_state["gallery_active_id"] = item["id"]
+            st.session_state["pending_photo"] = None
+            st.session_state["gallery_export_bytes"] = None
+            st.session_state["project_backup_bytes"] = None
+            st.rerun()
+        if st.button("Отменить этот снимок", key="cancel_pending_photo"):
+            st.session_state["pending_photo"] = None
+            st.rerun()
+
+
+def render_gallery_tab() -> None:
+    """Independent, paged thumbnail gallery with explicit per-photo editor."""
+    items = st.session_state["gallery"]
+    st.subheader("Галерея")
+    st.caption(
+        f"Сохранено изображений: {len(items)}. "
+        "Выбери фотографию, чтобы отредактировать название и заметку."
+    )
+    if not items:
+        st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
+        return
+
+    ids = {item["id"] for item in items}
+    if st.session_state.get("gallery_active_id") not in ids:
+        st.session_state["gallery_active_id"] = items[-1]["id"]
+
+    per_page = 9
+    page_count = (len(items) + per_page - 1) // per_page
+    if page_count > 1:
+        if not 1 <= st.session_state.get("gallery_page", 1) <= page_count:
+            st.session_state["gallery_page"] = page_count
+        page = st.number_input(
+            "Страница галереи", min_value=1, max_value=page_count,
+            step=1, key="gallery_page",
+        )
+    else:
+        page = 1
+    visible_items = items[(page - 1) * per_page : page * per_page]
+    for offset in range(0, len(visible_items), 3):
+        columns = st.columns(3)
+        for column, item in zip(columns, visible_items[offset:offset + 3]):
+            with column:
+                try:
+                    st.image(gallery_image_bytes(item), use_container_width=True)
+                except SessionStorageError as exc:
+                    st.warning(str(exc))
+                st.caption(item.get("title") or "Без названия")
+                if st.button("Открыть / редактировать", key="open_gallery_" + item["id"],
+                             use_container_width=True):
+                    st.session_state["gallery_active_id"] = item["id"]
+                    st.rerun()
+
+    active_id = st.session_state["gallery_active_id"]
+    active = next((item for item in items if item["id"] == active_id), items[-1])
+    with st.container(border=True):
+        st.markdown("#### Выбранное изображение")
+        try:
+            st.image(gallery_image_bytes(active), use_container_width=True)
+        except SessionStorageError as exc:
+            st.warning(str(exc))
+        with st.form("edit_gallery_" + active["id"]):
+            title = st.text_input(
+                "Название", value=active.get("title") or "", max_chars=150
+            )
+            note = st.text_area(
+                "Заметка", value=active.get("note") or "",
+                max_chars=3000, height=100,
+            )
+            saved = st.form_submit_button("Сохранить подпись", use_container_width=True)
+        if saved:
+            active["title"], active["note"] = title.strip(), note.strip()
+            st.session_state["gallery_export_bytes"] = None
+            st.session_state["project_backup_bytes"] = None
+            st.rerun()
+        if st.button("Удалить изображение", key="delete_gallery_" + active["id"]):
+            try:
+                if active.get("storage_key") and gallery_store:
+                    gallery_store.remove(active["storage_key"])
+                st.session_state["gallery"] = [
+                    item for item in items if item["id"] != active["id"]
+                ]
+                st.session_state["gallery_blobs"].pop(active["id"], None)
+                st.session_state["gallery_active_id"] = None
+                st.session_state["gallery_export_bytes"] = None
+                st.session_state["project_backup_bytes"] = None
+                st.rerun()
+            except SessionStorageError as exc:
+                st.error(f"Не удалось удалить изображение: {exc}")
+
+    st.divider()
+    st.subheader("Выгрузить галерею")
+    export_mode = st.radio(
+        "Формат", ["ZIP — только PNG/JPG", "PDF — изображения и заметки"],
+        key="gallery_export_mode", horizontal=True,
+    )
+    if st.button("Подготовить выгрузку", key="export_gallery_prepare"):
+        try:
+            pictures = collect_gallery_images()
+            if export_mode.startswith("ZIP"):
+                output = build_gallery_zip(items, pictures)
+                ext, mime = "zip", "application/zip"
+            else:
+                output = build_gallery_pdf(
+                    items, pictures, st.session_state["research_name"]
+                )
+                ext, mime = "pdf", "application/pdf"
+            st.session_state["gallery_export_bytes"] = (ext, mime, output)
+        except (SessionStorageError, OSError, ValueError) as exc:
+            st.error(f"Не удалось подготовить выгрузку: {exc}")
+    prepared = st.session_state.get("gallery_export_bytes")
+    if prepared and (prepared[0] == "zip") == export_mode.startswith("ZIP"):
+        st.download_button(
+            "Скачать галерею ." + prepared[0].upper(),
+            data=prepared[2],
+            file_name="snow-gallery." + prepared[0],
+            mime=prepared[1], use_container_width=True,
+        )
 
 
 with st.sidebar:
@@ -503,89 +657,9 @@ with st.sidebar:
                 st.rerun()
 
     st.divider()
-    st.subheader("5. Галерея выбранных областей")
-    st.caption("На карте нажмите «Выделить область», обведите фрагмент и выберите «В галерею».")
+    st.subheader("5. Сохранение исследования по ссылке")
     gallery_items = st.session_state["gallery"]
-    st.caption(f"Сохранённых изображений: {len(gallery_items)}.")
-    if gallery_items:
-        selected_id = st.selectbox(
-            "Просмотр фотографии",
-            [item["id"] for item in gallery_items],
-            format_func=lambda ident: next(
-                (f"{i+1}. {item['title'] or 'Без названия'}"
-                 for i, item in enumerate(gallery_items) if item["id"] == ident),
-                ident,
-            ),
-            key="gallery_selected_id",
-        )
-        gallery_item = next(i for i in gallery_items if i["id"] == selected_id)
-        try:
-            st.image(gallery_image_bytes(gallery_item), use_container_width=True)
-        except SessionStorageError as exc:
-            st.warning(str(exc))
-        old_title, old_note = gallery_item["title"], gallery_item["note"]
-        gallery_item["title"] = st.text_input(
-            "Название изображения (необязательно)",
-            value=gallery_item["title"],
-            max_chars=150,
-            key="gallery_title_" + selected_id,
-        )
-        gallery_item["note"] = st.text_area(
-            "Заметка к изображению (необязательно)",
-            value=gallery_item["note"],
-            max_chars=3000,
-            key="gallery_note_" + selected_id,
-            height=80,
-        )
-        if (gallery_item["title"], gallery_item["note"]) != (old_title, old_note):
-            st.session_state["gallery_export_bytes"] = None
-            st.session_state["project_backup_bytes"] = None
-        if st.button("Удалить это изображение", use_container_width=True):
-            try:
-                if gallery_item.get("storage_key") and gallery_store:
-                    gallery_store.remove(gallery_item["storage_key"])
-                st.session_state["gallery"] = [
-                    item for item in gallery_items if item["id"] != selected_id
-                ]
-                st.session_state["gallery_blobs"].pop(selected_id, None)
-                st.session_state.pop("gallery_selected_id", None)
-                st.session_state["gallery_export_bytes"] = None
-                st.rerun()
-            except SessionStorageError as exc:
-                st.error(f"Не удалось удалить изображение: {exc}")
-        export_mode = st.radio(
-            "Экспорт галереи",
-            ["ZIP — только PNG/JPG", "PDF — изображения, названия и заметки"],
-            key="gallery_export_mode",
-        )
-        if st.button("Подготовить выгрузку галереи", use_container_width=True):
-            try:
-                pics = collect_gallery_images()
-                if export_mode.startswith("ZIP"):
-                    result = build_gallery_zip(gallery_items, pics)
-                    ext, mime = "zip", "application/zip"
-                else:
-                    result = build_gallery_pdf(
-                        gallery_items, pics, st.session_state["research_name"]
-                    )
-                    ext, mime = "pdf", "application/pdf"
-                st.session_state["gallery_export_bytes"] = (ext, mime, result)
-            except (SessionStorageError, OSError, ValueError) as exc:
-                st.error(f"Не удалось экспортировать галерею: {exc}")
-        prepared = st.session_state.get("gallery_export_bytes")
-        if prepared and (prepared[0] == "zip") == export_mode.startswith("ZIP"):
-            st.download_button(
-                "Скачать галерею ." + prepared[0].upper(),
-                data=prepared[2],
-                file_name="snow-gallery." + prepared[0],
-                mime=prepared[1],
-                use_container_width=True,
-            )
-    else:
-        st.caption("Пока пусто. Можно сохранять несколько областей карты.")
 
-    st.divider()
-    st.subheader("6. Сохранение исследования по ссылке")
     st.text_input("Название исследования", key="research_name", max_chars=120)
     current_token = st.session_state.get("active_token")
     if not store:
@@ -647,7 +721,7 @@ with st.sidebar:
             )
 
     st.divider()
-    st.subheader("7. Геопривязанный GeoTIFF")
+    st.subheader("6. Геопривязанный GeoTIFF")
     available_areas = []
     current_area = st.session_state.get("map_state", {}).get("selection_bounds")
     if current_area:
@@ -718,106 +792,121 @@ if connection_error:
         st.write(connection_error)
         st.caption("Секреты не нужно добавлять в GitHub.")
 
-caption = (
-    f"Слоёв спутниковых снимков: {len(st.session_state['image_layers'])}."
-    + (" Для каждого снимка доступны собственные граница снега и изотермы."
-       if st.session_state["image_layers"] else
-       " Добавьте снимок или медиану в панели слева.")
-)
-tiles = current_tile_layers(bbox, connected)
-google_terrain = None
-maps_key = setting("GOOGLE_MAPS_API_KEY", "")
-if maps_key:
-    try:
-        google_terrain = cached_google_terrain(
-            str(maps_key), tuple(round(float(v), 6) for v in bbox)
+tab_map, tab_gallery = st.tabs([
+    "Карта",
+    f"Галерея ({len(st.session_state['gallery'])})",
+])
+
+with tab_map:
+    # Populate this space after the map component reports a screenshot;
+    # the editing form is visually above the map, not hidden below the iframe.
+    pending_slot = st.empty()
+    caption = (
+        f"Слоёв спутниковых снимков: {len(st.session_state['image_layers'])}."
+        + (" Для каждого снимка доступны собственные граница снега и изотермы."
+           if st.session_state["image_layers"] else
+           " Добавьте снимок или медиану в панели слева.")
+    )
+    tiles = current_tile_layers(bbox, connected)
+    google_terrain = None
+    maps_key = setting("GOOGLE_MAPS_API_KEY", "")
+    if maps_key:
+        try:
+            google_terrain = cached_google_terrain(
+                str(maps_key), tuple(round(float(v), 6) for v in bbox)
+            )
+        except Exception:
+            st.caption("Google Terrain недоступен; другие подложки работают.")
+    
+    config = map_config(
+        routes, points, tiles, caption, google_terrain,
+        st.session_state.get("map_state", {}),
+    )
+    # The component stays mounted on ordinary reruns; it is recreated only for a
+    # changed geometry/image or when a different shareable session is loaded.
+    render_id = hashlib.sha256(
+        json.dumps(
+            [routes, points, tiles, caption,
+             st.session_state.get("loaded_map_revision", "")],
+            ensure_ascii=False, sort_keys=True
+        ).encode()
+    ).hexdigest()[:24]
+    map_event = research_map(config=config, render_id=render_id)
+    if isinstance(map_event, dict):
+        previous_state = st.session_state.get("map_state", {})
+        incoming_state = map_event.get("map_state")
+        if isinstance(incoming_state, dict):
+            st.session_state["map_state"] = incoming_state
+        changed_analysis = (
+            isinstance(incoming_state, dict)
+            and bool(previous_state.get("analysis_visible", False))
+                != bool(incoming_state.get("analysis_visible", False))
         )
-    except Exception:
-        st.caption("Google Terrain недоступен; другие подложки работают.")
+        action = map_event.get("action")
+        event_id = map_event.get("event_id")
+        is_fresh = event_id is not None and event_id != st.session_state.get("processed_map_event")
+        if action == "delete_layer" and is_fresh:
+            st.session_state["processed_map_event"] = event_id
+            ident = map_event.get("layer_id", "")
+            old_count = len(st.session_state["image_layers"])
+            st.session_state["image_layers"] = [
+                item for item in st.session_state["image_layers"]
+                if item["id"] != ident
+            ]
+            if len(st.session_state["image_layers"]) != old_count:
+                st.session_state["runtime_tiles"].pop(ident, None)
+                st.session_state["analysis_tiles"].pop(ident, None)
+                st.session_state.get("map_state", {}).get("overlays", {}).pop(ident, None)
+                st.rerun()
+        elif action == "area_selected" and is_fresh:
+            st.session_state["processed_map_event"] = event_id
+            try:
+                bounds = validate_bounds(map_event.get("bounds"))
+                st.session_state["map_state"]["selection_bounds"] = bounds
+                st.rerun()
+            except SessionStorageError as exc:
+                st.warning(f"Не удалось выбрать область: {exc}")
+        elif action == "capture_image" and is_fresh:
+            st.session_state["processed_map_event"] = event_id
+            try:
+                if st.session_state.get("pending_photo"):
+                    st.warning("Сначала сохрани или отмени предыдущий снимок.")
+                else:
+                    bounds = validate_bounds(map_event.get("bounds"))
+                    fmt = map_event.get("image_format", "png")
+                    blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
+                    item = new_gallery_item(bounds, fmt)
+                    item["title"] = suggested_gallery_title(
+                        st.session_state["image_layers"],
+                        incoming_state if isinstance(incoming_state, dict)
+                        else st.session_state["map_state"],
+                    )
+                    # Keep the image in a draft until the title/note form is confirmed.
+                    # Every new screenshot gets its own random gallery ID.
+                    st.session_state["pending_photo"] = {"item": item, "data": blob}
+                    st.session_state["map_state"]["selection_bounds"] = bounds
+                    st.rerun()
+            except (SessionStorageError, ValueError, TypeError) as exc:
+                st.error(f"Не удалось подготовить снимок для галереи: {exc}")
+        elif changed_analysis:
+            # Server must request missing GEE contour URLs when all contours are
+            # switched on; switching off also drops them from the map payload.
+            st.rerun()
+    
+    for warning in st.session_state.get("warnings", []):
+        st.warning(warning)
+    if tiles:
+        st.caption(
+            "Каждый снимок отображается без облачной маски. "
+            "Для каждого снимка граница снега рассчитывается из облачно-маскированных "
+            "данных NDSI (может включать ледники), а изотермы ERA5-Land — модельная оценка. "
+            "Оба вида контуров включаются и скрываются одновременно."
+        )
+    with pending_slot.container():
+        render_pending_photo_form()
 
-config = map_config(
-    routes, points, tiles, caption, google_terrain,
-    st.session_state.get("map_state", {}),
-)
-# The component stays mounted on ordinary reruns; it is recreated only for a
-# changed geometry/image or when a different shareable session is loaded.
-render_id = hashlib.sha256(
-    json.dumps(
-        [routes, points, tiles, caption,
-         st.session_state.get("loaded_map_revision", "")],
-        ensure_ascii=False, sort_keys=True
-    ).encode()
-).hexdigest()[:24]
-map_event = research_map(config=config, render_id=render_id)
-if isinstance(map_event, dict):
-    previous_state = st.session_state.get("map_state", {})
-    incoming_state = map_event.get("map_state")
-    if isinstance(incoming_state, dict):
-        st.session_state["map_state"] = incoming_state
-    changed_analysis = (
-        isinstance(incoming_state, dict)
-        and bool(previous_state.get("analysis_visible", False))
-            != bool(incoming_state.get("analysis_visible", False))
-    )
-    action = map_event.get("action")
-    event_id = map_event.get("event_id")
-    is_fresh = event_id is not None and event_id != st.session_state.get("processed_map_event")
-    if action == "delete_layer" and is_fresh:
-        st.session_state["processed_map_event"] = event_id
-        ident = map_event.get("layer_id", "")
-        old_count = len(st.session_state["image_layers"])
-        st.session_state["image_layers"] = [
-            item for item in st.session_state["image_layers"]
-            if item["id"] != ident
-        ]
-        if len(st.session_state["image_layers"]) != old_count:
-            st.session_state["runtime_tiles"].pop(ident, None)
-            st.session_state["analysis_tiles"].pop(ident, None)
-            st.session_state.get("map_state", {}).get("overlays", {}).pop(ident, None)
-            st.rerun()
-    elif action == "area_selected" and is_fresh:
-        st.session_state["processed_map_event"] = event_id
-        try:
-            bounds = validate_bounds(map_event.get("bounds"))
-            st.session_state["map_state"]["selection_bounds"] = bounds
-            st.rerun()
-        except SessionStorageError as exc:
-            st.warning(f"Не удалось выбрать область: {exc}")
-    elif action == "capture_image" and is_fresh:
-        st.session_state["processed_map_event"] = event_id
-        try:
-            bounds = validate_bounds(map_event.get("bounds"))
-            fmt = map_event.get("image_format", "png")
-            blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
-            item = new_gallery_item(bounds, fmt)
-            token = st.session_state.get("active_token")
-            if token and gallery_store:
-                try:
-                    item["storage_key"] = gallery_store.put(token, item, blob)
-                except SessionStorageError as exc:
-                    st.warning(f"Фото осталось только в текущей вкладке: {exc}")
-            st.session_state["gallery_blobs"][item["id"]] = blob
-            st.session_state["gallery"].append(item)
-            st.session_state["gallery_export_bytes"] = None
-            st.session_state["project_backup_bytes"] = None
-            st.session_state["map_state"]["selection_bounds"] = bounds
-            st.rerun()
-        except (SessionStorageError, ValueError, TypeError) as exc:
-            st.error(f"Не удалось добавить изображение в галерею: {exc}")
-    elif changed_analysis:
-        # Server must request missing GEE contour URLs when all contours are
-        # switched on; switching off also drops them from the map payload.
-        st.rerun()
-
-for warning in st.session_state.get("warnings", []):
-    st.warning(warning)
-if tiles:
-    st.caption(
-        "Каждый снимок отображается без облачной маски. "
-        "Для каждого снимка граница снега рассчитывается из облачно-маскированных "
-        "данных NDSI (может включать ледники), а изотермы ERA5-Land — модельная оценка. "
-        "Оба вида контуров включаются и скрываются одновременно."
-    )
+with tab_gallery:
+    render_gallery_tab()
 
 # Autosave if the state has actually changed. No credentials or tile URLs
 # are included in the stored payload.

@@ -103,6 +103,26 @@ def normalize_gallery(items: list) -> list[dict]:
     return out
 
 
+def suggested_gallery_title(layers: list[dict], map_state: dict) -> str:
+    """Default caption reflects the visible satellite composition, topmost first.
+
+    Gallery screenshots can include several acquisitions; their image descriptors
+    are already compact (S2 · DD.MM.YY and L8/9 · DD–DD.MM.YY · мед.).
+    """
+    states = (map_state or {}).get("overlays") or {}
+    visible = [
+        str(layer.get("name") or "Снимок")
+        for layer in layers
+        if states.get(layer.get("id"), {}).get("visible", True)
+    ]
+    if not visible:
+        return "Карта · " + datetime.now(timezone.utc).strftime("%d.%m.%y")
+    newest_first = visible[::-1]
+    if len(newest_first) <= 2:
+        return " + ".join(newest_first)[:150]
+    return (newest_first[0] + f" + {len(newest_first)-1} слоя")[:150]
+
+
 def new_gallery_item(bounds: list, fmt: str = "png") -> dict:
     return {
         "id": "gal_" + secrets.token_hex(10),

@@ -35,9 +35,9 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
     <b>Подложка</b><div id="basemaps"></div>
     <div class="layer-section">Снимки (новые поверх старых)</div>
     <div id="image-overlays"></div>
-    <div class="layer-section">Граница снега, изотермы и трек</div>
+    <div class="layer-section">Аналитика и маршрут</div>
     <div id="overlays"></div>
-    <div style="margin-top:10px;color:#6b7280;font-size:11px">Каждый снимок можно скрыть, изменить его прозрачность или удалить. Граница снега рассчитана по последнему добавленному снимку.</div>
+    <div style="margin-top:10px;color:#6b7280;font-size:11px">У каждого снимка свои граница снега и изотермы. Контуры включаются все сразу и повторяют прозрачность своего снимка.</div>
   </div>
 </div>
 <div id="top-note"></div>
@@ -77,14 +77,16 @@ function collectState() {
   const namedBase=Object.keys(bases).find(name=>bases[name]===currentBase) || 'Рельеф (Esri)';
   const layerState={};
   for (const o of overlays) {
+    if (o.role !== 'image') continue;
     layerState[o.id]={
       visible:map.hasLayer(o.layer),
-      opacity:Number(o.layer.options.opacity || 0)
+      opacity:Number(o.layer.options.opacity ?? 0)
     };
   }
   return {
     base:namedBase,
     overlays:layerState,
+    analysis_visible:analysisVisible,
     track:map.hasLayer(routeGroup),
     points:map.hasLayer(pointGroup),
     labels:map.hasLayer(labelGroup),
@@ -102,14 +104,21 @@ function reportChange() {
 
 const map = L.map('map', {zoomControl:true, preferCanvas:true});
 activeMap = map;
-// Explicit panes guarantee that RGB layers NEVER obscure snow, tracks,
-// waypoints, point labels, or ERA5 isolines, regardless of insertion order.
-for (const [pane,z] of [
-  ['imageryPane',310], ['snowPane',510], ['isoPane',540],
-  ['routePane',600], ['pointPane',650], ['labelPane',675]
-]) {
+// Each image gets its own RGB/snow/isotherm stack:
+// RGB(i) < snow(i) < isotherms(i) < RGB(i+1) < route < points.
+// No CSS layer is globally on top of imagery of a later acquisition.
+const imageIds=(config.tiles||[]).filter(t=>t.role==='image').map(t=>t.id);
+for (const [index,id] of imageIds.entries()) {
+  for (const [kind,offset] of [['image',0],['snow',1],['isotherm',2]]) {
+    const paneName=kind+'_'+id;
+    map.createPane(paneName);
+    map.getPane(paneName).style.zIndex=String(300+index*4+offset);
+  }
+}
+const routeZ=320+imageIds.length*4;
+for (const [pane,offset] of [['routePane',0],['pointPane',1],['labelPane',2]]) {
   map.createPane(pane);
-  map.getPane(pane).style.zIndex=String(z);
+  map.getPane(pane).style.zIndex=String(routeZ+offset);
 }
 const bases = {
   'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
@@ -170,33 +179,52 @@ for (const point of config.points){
 if (restored.points !== false) pointGroup.addTo(map);
 if (restored.labels === true) labelGroup.addTo(map);
 // Labels: users control their visibility in the map's Layers menu.
+let analysisVisible=restored.analysis_visible === true;
 const overlays = [];
 for (const entry of config.tiles) {
   if (!entry.url) continue;
-  const role=entry.role||'analysis';
+  const role=entry.role||'image';
   const id=entry.id||entry.name;
-  const saved=(restored.overlays||{})[id] || (restored.overlays||{})[entry.name] || {};
-  const opacity=(typeof saved.opacity==='number') ? saved.opacity : entry.opacity;
-  const visible=(typeof saved.visible==='boolean') ? saved.visible : entry.visible;
-  const pane=role==='image' ? 'imageryPane' : (role==='snow' ? 'snowPane' : 'isoPane');
+  const source=entry.source_id||id;
+  const saved=(restored.overlays||{})[id]||{};
+  const opacity=role==='image' && typeof saved.opacity==='number'
+    ? saved.opacity : entry.opacity;
+  const visible=role==='image' && typeof saved.visible==='boolean'
+    ? saved.visible : entry.visible;
+  const pane=(role==='image'?'image_':(role==='snow'?'snow_':'isotherm_'))+source;
   const layer=L.tileLayer(entry.url, {
     pane:pane, opacity:opacity, maxZoom:20,
     attribution:'© Google Earth Engine / Copernicus / USGS',crossOrigin:true
   });
-  if (visible) layer.addTo(map);
+  if (role==='image' && visible) layer.addTo(map);
   let errors=0;
   layer.on('tileerror',()=>{
     errors++;
     if (errors===4) {
       document.getElementById('top-note').textContent=
-        'Не удалось загрузить тайлы «'+entry.name+'». Возможно, истёк срок URL GEE.';
+        'Не удалось загрузить тайлы «'+entry.name+'». Попробуйте обновить снимки.';
     }
   });
   overlays.push({
-    id:id,name:entry.name,layer:layer,visible:visible,opacity:opacity,
-    role:role,checkbox:null
+    id:id,sourceId:source,name:entry.name,layer:layer,visible:visible,
+    opacity:opacity,baseOpacity:entry.opacity,role:role,checkbox:null
   });
 }
+function refreshDependentLayers(sourceId){
+  const parent=overlays.find(o=>o.role==='image' && o.id===sourceId);
+  for (const other of overlays.filter(o=>o.role!=='image' && o.sourceId===sourceId)) {
+    if(parent && analysisVisible && map.hasLayer(parent.layer)) {
+      other.layer.setOpacity(parent.opacity * other.baseOpacity);
+      if (!map.hasLayer(other.layer)) other.layer.addTo(map);
+    } else {
+      map.removeLayer(other.layer);
+    }
+  }
+}
+function refreshAllDependents() {
+  overlays.filter(o=>o.role==='image').forEach(o=>refreshDependentLayers(o.id));
+}
+refreshAllDependents();
 const basemapDiv=document.querySelector('#basemaps');
 for (const [name, layer] of Object.entries(bases)) {
   const row=document.createElement('label');row.className='base-opt';
@@ -262,6 +290,11 @@ function addCheck(name, layer, initial, opacity, option={}) {
   wrapper.append(head);
   checkbox.onchange=()=>{
     checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
+    const obj=overlays.find(o=>o.id===option.id);
+    if(obj && obj.role==='image') {
+      obj.visible=checkbox.checked;
+      refreshDependentLayers(obj.id);
+    }
     reportChange();
   };
   if (option.removable && option.id) {
@@ -272,14 +305,19 @@ function addCheck(name, layer, initial, opacity, option={}) {
     del.title='Удалить снимок из исследования';
     del.setAttribute('aria-label','Удалить слой '+name);
     del.onclick=()=>{
-      const index=overlays.findIndex(o=>o.id===option.id);
-      if(index<0) return;
-      const removed=overlays.splice(index,1)[0];
-      map.removeLayer(removed.layer);
+      const index=overlays.findIndex(o=>o.id===option.id && o.role==='image');
+      if (index<0) return;
+      const image=overlays[index];
+      for(let j=overlays.length-1;j>=0;j--) {
+        if(overlays[j].sourceId===image.id) {
+          map.removeLayer(overlays[j].layer);
+          overlays.splice(j,1);
+        }
+      }
       wrapper.remove();
       clearTimeout(activeSnapshotTimer);
       setComponentValue({
-        action:'delete_layer',layer_id:removed.id,
+        action:'delete_layer',layer_id:image.id,
         map_state:collectState(),event_id:Date.now()
       });
     };
@@ -288,17 +326,19 @@ function addCheck(name, layer, initial, opacity, option={}) {
   if (opacity!==null && opacity!==undefined && layer.setOpacity){
     const line=document.createElement('div');
     line.className='opacity-row';
-    const caption=document.createElement('span');
-    caption.textContent='Непрозрачность';
+    const caption=document.createElement('span');caption.textContent='Непрозрачность';
     const slider=document.createElement('input');
-    slider.type='range';
-    slider.min=0;slider.max=100;slider.step=5;
+    slider.type='range';slider.min=0;slider.max=100;slider.step=5;
     slider.value=Math.round(opacity*100);
-    const percent=document.createElement('span');
-    percent.textContent=slider.value+'%';
+    const percent=document.createElement('span');percent.textContent=slider.value+'%';
     slider.oninput=()=>{
       const val=Number(slider.value)/100;
       layer.setOpacity(val);
+      const obj=overlays.find(o=>o.id===option.id);
+      if(obj && obj.role==='image') {
+        obj.opacity=val;
+        refreshDependentLayers(obj.id);
+      }
       percent.textContent=slider.value+'%';
       reportChange();
     };
@@ -308,10 +348,23 @@ function addCheck(name, layer, initial, opacity, option={}) {
   return checkbox;
 }
 for (const item of overlays) {
+  if(item.role!=='image') continue;
   item.checkbox=addCheck(item.name,item.layer,item.visible,item.opacity,{
-    id:item.id,removable:item.role==='image',role:item.role
+    id:item.id,removable:true,role:item.role
   });
 }
+const outlineRow=document.createElement('label');
+outlineRow.className='layer-check layer-row';
+const outlineCheck=document.createElement('input');
+outlineCheck.type='checkbox';
+outlineCheck.checked=analysisVisible;
+outlineRow.append(outlineCheck,document.createTextNode('Граница снега + изотермы (все снимки)'));
+overlayDiv.append(outlineRow);
+outlineCheck.onchange=()=>{
+  analysisVisible=outlineCheck.checked;
+  refreshAllDependents();
+  reportChange();
+};
 addCheck('Трек',routeGroup,restored.track !== false,null);
 addCheck('Точки / препятствия',pointGroup,restored.points !== false,null);
 addCheck('Подписи точек',labelGroup,restored.labels === true,null);

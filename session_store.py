@@ -50,7 +50,8 @@ def normalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "points": points,
         "notes": notes,
         "ui": payload.get("ui", {}),
-        "selection": payload.get("selection"),
+        "selection": payload.get("selection"),  # legacy one-image sessions
+        "layers": payload.get("layers", []),  # unlimited descriptors, no raster bytes
         "map_state": payload.get("map_state", {}),
     }
     import json

@@ -24,24 +24,42 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
 .base-opt input{accent-color:#2667b7}
 .label-icon{white-space:nowrap;background:rgba(255,255,255,.88);font-weight:600;color:#222;padding:2px 5px;border:1px solid #5558;border-radius:4px;font-size:11px;text-shadow:0 1px 1px #fff;box-shadow:0 1px 3px #0002}
 .leaflet-control-attribution{font-size:9px !important}
+#capture-control{position:absolute;z-index:10000000;top:12px;left:58px;max-width:calc(100% - 410px);display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#fff;padding:7px;border:1px solid #ccd3d9;border-radius:9px;box-shadow:0 2px 8px #0002;font-size:12px}
+#capture-control button,#capture-control select{font:inherit;border:1px solid #b8c5cf;background:#fff;border-radius:5px;padding:5px 7px;cursor:pointer;color:#1c2930}
+#capture-control button:disabled{opacity:.45;cursor:default}
+#capture-status{font-size:11px;color:#475569}
+#layer-control{z-index:10000001}
+#top-note{z-index:10000000}
+@media(max-width:780px){#capture-control{top:65px;left:10px;max-width:calc(100% - 20px)}#layer-control{width:220px}}
 #top-note{position:absolute;z-index:900;bottom:28px;left:12px;background:#fffffff0;padding:7px 10px;border-radius:7px;font-size:12px;max-width:65%;pointer-events:none;box-shadow:0 1px 6px #0002}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="capture-control">
+  <button type="button" id="select-area">▢ Выделить область</button>
+  <select id="capture-format" aria-label="Формат снимка">
+    <option value="png">PNG</option>
+    <option value="jpg">JPG</option>
+  </select>
+  <button type="button" id="save-area" disabled>В галерею</button>
+  <button type="button" id="cancel-area">✕</button>
+  <span id="capture-status"></span>
+</div>
 <div id="layer-control">
   <button id="layers-head" type="button"><span>☷ Слои карты</span><span id="arrow">▾</span></button>
   <div id="layers-body">
     <b>Подложка</b><div id="basemaps"></div>
     <div class="layer-section">Снимки (новые поверх старых)</div>
     <div id="image-overlays"></div>
-    <div class="layer-section">Граница снега, изотермы и трек</div>
+    <div class="layer-section">Аналитика и маршрут</div>
     <div id="overlays"></div>
-    <div style="margin-top:10px;color:#6b7280;font-size:11px">Каждый снимок можно скрыть, изменить его прозрачность или удалить. Граница снега рассчитана по последнему добавленному снимку.</div>
+    <div style="margin-top:10px;color:#6b7280;font-size:11px">У каждого снимка свои граница снега и изотермы. Контуры включаются все сразу и повторяют прозрачность своего снимка.</div>
   </div>
 </div>
 <div id="top-note"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js" crossorigin="anonymous"></script>
 <script>
 'use strict';
 // v1 bidirectional Streamlit component: the parent sends config on render.
@@ -72,19 +90,25 @@ document.getElementById('overlays').replaceChildren();
 document.getElementById('image-overlays').replaceChildren();
 const restored = config.mapState || {};
 let canReportChanges = false;
+let drawingArea = false, originLatLng = null, areaRect = null;
+let chosenBounds = Array.isArray(restored.selection_bounds) ? restored.selection_bounds : null;
+let captureBusy = false;
 function collectState() {
   const c=map.getCenter();
   const namedBase=Object.keys(bases).find(name=>bases[name]===currentBase) || 'Рельеф (Esri)';
   const layerState={};
   for (const o of overlays) {
+    if (o.role !== 'image') continue;
     layerState[o.id]={
       visible:map.hasLayer(o.layer),
-      opacity:Number(o.layer.options.opacity || 0)
+      opacity:Number(o.layer.options.opacity ?? 0)
     };
   }
   return {
     base:namedBase,
     overlays:layerState,
+    analysis_visible:analysisVisible,
+    selection_bounds:chosenBounds,
     track:map.hasLayer(routeGroup),
     points:map.hasLayer(pointGroup),
     labels:map.hasLayer(labelGroup),
@@ -102,20 +126,27 @@ function reportChange() {
 
 const map = L.map('map', {zoomControl:true, preferCanvas:true});
 activeMap = map;
-// Explicit panes guarantee that RGB layers NEVER obscure snow, tracks,
-// waypoints, point labels, or ERA5 isolines, regardless of insertion order.
-for (const [pane,z] of [
-  ['imageryPane',310], ['snowPane',510], ['isoPane',540],
-  ['routePane',600], ['pointPane',650], ['labelPane',675]
-]) {
+// Each image gets its own RGB/snow/isotherm stack:
+// RGB(i) < snow(i) < isotherms(i) < RGB(i+1) < route < points.
+// No CSS layer is globally on top of imagery of a later acquisition.
+const imageIds=(config.tiles||[]).filter(t=>t.role==='image').map(t=>t.id);
+for (const [index,id] of imageIds.entries()) {
+  for (const [kind,offset] of [['image',0],['snow',1],['isotherm',2]]) {
+    const paneName=kind+'_'+id;
+    map.createPane(paneName);
+    map.getPane(paneName).style.zIndex=String(300+index*4+offset);
+  }
+}
+const routeZ=320+imageIds.length*4;
+for (const [pane,offset] of [['routePane',0],['pointPane',1],['labelPane',2]]) {
   map.createPane(pane);
-  map.getPane(pane).style.zIndex=String(z);
+  map.getPane(pane).style.zIndex=String(routeZ+offset);
 }
 const bases = {
-  'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
-  'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
-  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,attribution:'© OpenStreetMap contributors'}),
-  'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Imagery © Esri and providers'})
+  'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,crossOrigin:true,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
+  'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,crossOrigin:true,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,crossOrigin:true,attribution:'© OpenStreetMap contributors'}),
+  'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,crossOrigin:true,attribution:'Imagery © Esri and providers'})
 };
 // The official Google Map Tiles API requires a paid Maps Platform project,
 // enabled Map Tiles API and a separately restricted GOOGLE_MAPS_API_KEY.
@@ -123,7 +154,7 @@ const bases = {
 const googleConfig = config.googleTerrain || {};
 if (googleConfig.url) {
   bases['Google Terrain'] = L.tileLayer(googleConfig.url, {
-    maxZoom:20,
+    maxZoom:20,crossOrigin:true,
     attribution: '© Google Maps · ' + escGoogleAttribution(googleConfig.attribution || 'Map data © Google Maps')
   });
 }
@@ -170,33 +201,52 @@ for (const point of config.points){
 if (restored.points !== false) pointGroup.addTo(map);
 if (restored.labels === true) labelGroup.addTo(map);
 // Labels: users control their visibility in the map's Layers menu.
+let analysisVisible=restored.analysis_visible === true;
 const overlays = [];
 for (const entry of config.tiles) {
   if (!entry.url) continue;
-  const role=entry.role||'analysis';
+  const role=entry.role||'image';
   const id=entry.id||entry.name;
-  const saved=(restored.overlays||{})[id] || (restored.overlays||{})[entry.name] || {};
-  const opacity=(typeof saved.opacity==='number') ? saved.opacity : entry.opacity;
-  const visible=(typeof saved.visible==='boolean') ? saved.visible : entry.visible;
-  const pane=role==='image' ? 'imageryPane' : (role==='snow' ? 'snowPane' : 'isoPane');
+  const source=entry.source_id||id;
+  const saved=(restored.overlays||{})[id]||{};
+  const opacity=role==='image' && typeof saved.opacity==='number'
+    ? saved.opacity : entry.opacity;
+  const visible=role==='image' && typeof saved.visible==='boolean'
+    ? saved.visible : entry.visible;
+  const pane=(role==='image'?'image_':(role==='snow'?'snow_':'isotherm_'))+source;
   const layer=L.tileLayer(entry.url, {
     pane:pane, opacity:opacity, maxZoom:20,
     attribution:'© Google Earth Engine / Copernicus / USGS',crossOrigin:true
   });
-  if (visible) layer.addTo(map);
+  if (role==='image' && visible) layer.addTo(map);
   let errors=0;
   layer.on('tileerror',()=>{
     errors++;
     if (errors===4) {
       document.getElementById('top-note').textContent=
-        'Не удалось загрузить тайлы «'+entry.name+'». Возможно, истёк срок URL GEE.';
+        'Не удалось загрузить тайлы «'+entry.name+'». Попробуйте обновить снимки.';
     }
   });
   overlays.push({
-    id:id,name:entry.name,layer:layer,visible:visible,opacity:opacity,
-    role:role,checkbox:null
+    id:id,sourceId:source,name:entry.name,layer:layer,visible:visible,
+    opacity:opacity,baseOpacity:entry.opacity,role:role,checkbox:null
   });
 }
+function refreshDependentLayers(sourceId){
+  const parent=overlays.find(o=>o.role==='image' && o.id===sourceId);
+  for (const other of overlays.filter(o=>o.role!=='image' && o.sourceId===sourceId)) {
+    if(parent && analysisVisible && map.hasLayer(parent.layer)) {
+      other.layer.setOpacity(parent.opacity * other.baseOpacity);
+      if (!map.hasLayer(other.layer)) other.layer.addTo(map);
+    } else {
+      map.removeLayer(other.layer);
+    }
+  }
+}
+function refreshAllDependents() {
+  overlays.filter(o=>o.role==='image').forEach(o=>refreshDependentLayers(o.id));
+}
+refreshAllDependents();
 const basemapDiv=document.querySelector('#basemaps');
 for (const [name, layer] of Object.entries(bases)) {
   const row=document.createElement('label');row.className='base-opt';
@@ -262,6 +312,11 @@ function addCheck(name, layer, initial, opacity, option={}) {
   wrapper.append(head);
   checkbox.onchange=()=>{
     checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
+    const obj=overlays.find(o=>o.id===option.id);
+    if(obj && obj.role==='image') {
+      obj.visible=checkbox.checked;
+      refreshDependentLayers(obj.id);
+    }
     reportChange();
   };
   if (option.removable && option.id) {
@@ -272,14 +327,19 @@ function addCheck(name, layer, initial, opacity, option={}) {
     del.title='Удалить снимок из исследования';
     del.setAttribute('aria-label','Удалить слой '+name);
     del.onclick=()=>{
-      const index=overlays.findIndex(o=>o.id===option.id);
-      if(index<0) return;
-      const removed=overlays.splice(index,1)[0];
-      map.removeLayer(removed.layer);
+      const index=overlays.findIndex(o=>o.id===option.id && o.role==='image');
+      if (index<0) return;
+      const image=overlays[index];
+      for(let j=overlays.length-1;j>=0;j--) {
+        if(overlays[j].sourceId===image.id) {
+          map.removeLayer(overlays[j].layer);
+          overlays.splice(j,1);
+        }
+      }
       wrapper.remove();
       clearTimeout(activeSnapshotTimer);
       setComponentValue({
-        action:'delete_layer',layer_id:removed.id,
+        action:'delete_layer',layer_id:image.id,
         map_state:collectState(),event_id:Date.now()
       });
     };
@@ -288,17 +348,19 @@ function addCheck(name, layer, initial, opacity, option={}) {
   if (opacity!==null && opacity!==undefined && layer.setOpacity){
     const line=document.createElement('div');
     line.className='opacity-row';
-    const caption=document.createElement('span');
-    caption.textContent='Непрозрачность';
+    const caption=document.createElement('span');caption.textContent='Непрозрачность';
     const slider=document.createElement('input');
-    slider.type='range';
-    slider.min=0;slider.max=100;slider.step=5;
+    slider.type='range';slider.min=0;slider.max=100;slider.step=5;
     slider.value=Math.round(opacity*100);
-    const percent=document.createElement('span');
-    percent.textContent=slider.value+'%';
+    const percent=document.createElement('span');percent.textContent=slider.value+'%';
     slider.oninput=()=>{
       const val=Number(slider.value)/100;
       layer.setOpacity(val);
+      const obj=overlays.find(o=>o.id===option.id);
+      if(obj && obj.role==='image') {
+        obj.opacity=val;
+        refreshDependentLayers(obj.id);
+      }
       percent.textContent=slider.value+'%';
       reportChange();
     };
@@ -308,13 +370,145 @@ function addCheck(name, layer, initial, opacity, option={}) {
   return checkbox;
 }
 for (const item of overlays) {
+  if(item.role!=='image') continue;
   item.checkbox=addCheck(item.name,item.layer,item.visible,item.opacity,{
-    id:item.id,removable:item.role==='image',role:item.role
+    id:item.id,removable:true,role:item.role
   });
 }
+const outlineRow=document.createElement('label');
+outlineRow.className='layer-check layer-row';
+const outlineCheck=document.createElement('input');
+outlineCheck.type='checkbox';
+outlineCheck.checked=analysisVisible;
+outlineRow.append(outlineCheck,document.createTextNode('Граница снега + изотермы (все снимки)'));
+overlayDiv.append(outlineRow);
+outlineCheck.onchange=()=>{
+  analysisVisible=outlineCheck.checked;
+  refreshAllDependents();
+  reportChange();
+};
 addCheck('Трек',routeGroup,restored.track !== false,null);
 addCheck('Точки / препятствия',pointGroup,restored.points !== false,null);
 addCheck('Подписи точек',labelGroup,restored.labels === true,null);
+// The selection rectangle is intentionally above image layers but omitted
+// from the gallery screenshot itself. Coordinates are WGS84 [W,S,E,N].
+const captureStatus=document.getElementById('capture-status');
+const saveAreaButton=document.getElementById('save-area');
+function setSelectedBounds(bounds) {
+  chosenBounds=bounds;
+  if(areaRect) map.removeLayer(areaRect);
+  if(bounds) {
+    areaRect=L.rectangle([[bounds[1],bounds[0]],[bounds[3],bounds[2]]],{
+      pane:'routePane',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+    }).addTo(map);
+    saveAreaButton.disabled=false;
+    captureStatus.textContent='Область выбрана';
+  } else {
+    areaRect=null;
+    saveAreaButton.disabled=true;
+    captureStatus.textContent='';
+  }
+}
+if(chosenBounds) setSelectedBounds(chosenBounds);
+document.getElementById('select-area').onclick=()=>{
+  if(captureBusy) return;
+  drawingArea=true;
+  originLatLng=null;
+  map.dragging.disable();
+  captureStatus.textContent='Протяните прямоугольник мышью по карте';
+};
+document.getElementById('cancel-area').onclick=()=>{
+  drawingArea=false;originLatLng=null;map.dragging.enable();
+  setSelectedBounds(null);reportChange();
+};
+map.on('mousedown',e=>{
+  if(!drawingArea || (e.originalEvent && e.originalEvent.button!==0)) return;
+  originLatLng=e.latlng;
+  setSelectedBounds(null);
+});
+map.on('mousemove',e=>{
+  if(!drawingArea || !originLatLng) return;
+  const west=Math.min(originLatLng.lng,e.latlng.lng);
+  const east=Math.max(originLatLng.lng,e.latlng.lng);
+  const south=Math.min(originLatLng.lat,e.latlng.lat);
+  const north=Math.max(originLatLng.lat,e.latlng.lat);
+  if(areaRect)map.removeLayer(areaRect);
+  areaRect=L.rectangle([[south,west],[north,east]],{
+    pane:'routePane',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+  }).addTo(map);
+});
+map.on('mouseup',e=>{
+  if(!drawingArea || !originLatLng) return;
+  const west=Math.min(originLatLng.lng,e.latlng.lng);
+  const east=Math.max(originLatLng.lng,e.latlng.lng);
+  const south=Math.min(originLatLng.lat,e.latlng.lat);
+  const north=Math.max(originLatLng.lat,e.latlng.lat);
+  drawingArea=false;originLatLng=null;map.dragging.enable();
+  if(Math.abs(east-west)<0.00001 || Math.abs(north-south)<0.00001) {
+    setSelectedBounds(null);return;
+  }
+  setSelectedBounds([west,south,east,north]);
+  setComponentValue({
+    action:'area_selected', bounds:chosenBounds,
+    map_state:collectState(), event_id:Date.now()
+  });
+});
+saveAreaButton.onclick=async()=>{
+  if(captureBusy || !chosenBounds) return;
+  if(typeof window.html2canvas!=='function') {
+    captureStatus.textContent='Сервис снимка карты недоступен';return;
+  }
+  captureBusy=true;saveAreaButton.disabled=true;
+  captureStatus.textContent='Сохраняю изображение…';
+  try {
+    const southWest=map.latLngToContainerPoint([chosenBounds[1],chosenBounds[0]]);
+    const northEast=map.latLngToContainerPoint([chosenBounds[3],chosenBounds[2]]);
+    const minX=Math.min(southWest.x,northEast.x),maxX=Math.max(southWest.x,northEast.x);
+    const minY=Math.min(southWest.y,northEast.y),maxY=Math.max(southWest.y,northEast.y);
+    const size=map.getSize();
+    if(minX < -1 || minY < -1 || maxX > size.x + 1 || maxY > size.y + 1)
+      throw Error('Область не целиком на экране. Выделите её заново.');
+    const left=Math.max(0,minX),top=Math.max(0,minY);
+    const right=Math.min(size.x,maxX),bottom=Math.min(size.y,maxY);
+    if(right-left<12 || bottom-top<12) throw Error('Слишком маленькая область.');
+    const originalRect=areaRect;
+    if(originalRect)map.removeLayer(originalRect);
+    let canvas;
+    try {
+      canvas=await window.html2canvas(map.getContainer(),{
+        useCORS:true,allowTaint:false,backgroundColor:'#f4f4f4',
+        logging:false,scale:Math.min(2,window.devicePixelRatio||1),
+        ignoreElements:el=>el.classList && el.classList.contains('leaflet-control-container')
+      });
+    } finally {
+      if(originalRect)originalRect.addTo(map);
+    }
+    const sx=canvas.width/map.getSize().x;
+    const sy=canvas.height/map.getSize().y;
+    const sw=Math.ceil((right-left)*sx),sh=Math.ceil((bottom-top)*sy);
+    const reduce=Math.min(1,Math.sqrt(3000000/(sw*sh)));
+    const finalCanvas=document.createElement('canvas');
+    finalCanvas.width=Math.max(1,Math.floor(sw*reduce));
+    finalCanvas.height=Math.max(1,Math.floor(sh*reduce));
+    finalCanvas.getContext('2d').drawImage(
+      canvas,left*sx,top*sy,sw,sh,0,0,finalCanvas.width,finalCanvas.height
+    );
+    const fmt=document.getElementById('capture-format').value;
+    const mime=fmt==='jpg'?'image/jpeg':'image/png';
+    const imageData=finalCanvas.toDataURL(mime,fmt==='jpg'?.85:undefined);
+    if(imageData.length>2800000)throw Error('Скриншот более 2 МБ. Выберите JPG либо меньшую область.');
+    setComponentValue({
+      action:'capture_image', image_data:imageData,
+      image_format:fmt,bounds:chosenBounds,
+      map_state:collectState(),event_id:Date.now()
+    });
+    captureStatus.textContent='Снимок отправлен в галерею';
+  } catch(error) {
+    captureStatus.textContent='Ошибка: '+String(error.message||error).slice(0,130);
+  } finally {
+    captureBusy=false;saveAreaButton.disabled=!chosenBounds;
+  }
+};
 const bounds=config.bounds;
 if (restored.center && Array.isArray(restored.center) && restored.center.length===2 && Number.isFinite(Number(restored.zoom))) {
   map.setView(restored.center, restored.zoom);

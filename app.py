@@ -84,6 +84,8 @@ def apply_research_payload(payload: dict):
     st.session_state["saved_points"] = payload.get("points") or []
     st.session_state["notes"] = payload.get("notes") or []
     st.session_state["manual_points"] = []
+    # Rotate the uploader key instead of writing into a non-settable file widget.
+    st.session_state["geo_uploader_revision"] = st.session_state.get("geo_uploader_revision", 0) + 1
     st.session_state["map_state"] = payload.get("map_state") or {}
     # Migrate sessions created before multiple independent imagery layers.
     existing_layers = payload.get("layers")
@@ -187,7 +189,6 @@ with st.sidebar:
                 st.session_state.pop("active_token", None)
                 st.session_state.pop("last_saved_digest", None)
                 st.session_state["loaded_map_revision"] = "imported"
-                st.session_state["geo_files"] = []
                 st.query_params.clear()
                 st.rerun()
             except (SessionStorageError, ValueError, KeyError, TypeError) as exc:
@@ -196,7 +197,7 @@ with st.sidebar:
         "Загрузить файлы KML или GPX",
         type=["kml", "gpx", "csv"],
         accept_multiple_files=True,
-        key="geo_files",
+        key=f"geo_files_{st.session_state.get('geo_uploader_revision', 0)}",
         help="Выберите несколько файлов одновременно. CSV — для точек.",
     )
 

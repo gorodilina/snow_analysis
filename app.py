@@ -287,33 +287,52 @@ try:
 except Exception as exc:
     connection_error = str(exc)
 
-# Reconstruct Earth Engine map URLs when restoring a saved research link.
-# The short-lived GEE tile URLs themselves are not persisted.
-if st.session_state.get("pending_restore") and connected:
-    sel = st.session_state.get("selection") or {}
-    try:
-        with st.spinner("Восстанавливаю сохранённый снимок..."):
-            if sel.get("kind") == "scene":
-                day = date.fromisoformat(sel["day"])
-                raw = scene_image(sel["satellite"], bbox, day, sel.get("image_id"), mask_clouds=False)
-                masked = scene_image(sel["satellite"], bbox, day, sel.get("image_id"), mask_clouds=True)
-                caption = f"{sel['satellite']} · {day} · сохранённая сцена"
-            elif sel.get("kind") == "median":
-                day = date.fromisoformat(sel["start"])
-                raw, masked, count = median_images(
-                    sel["satellite"], bbox, day, int(sel["length"])
-                )
-                caption = f"Медианная мозаика · {sel['satellite']} · {count} сцен"
-            else:
-                raise ValueError("Неизвестный тип сохранённого снимка.")
-            tiles, warnings = build_tile_layers(raw, bbox, day, masked)
-            st.session_state["tiles"] = tiles
-            st.session_state["image_caption"] = caption
+def add_image_layer(spec: dict, region: list[float]) -> None:
+    """Create one GEE tile, then append the new independent image."""
+    tile = image_rgb_tile(spec, region)
+    st.session_state["image_layers"].append(spec)
+    st.session_state["runtime_tiles"][spec["id"]] = tile
+    # Latest image becomes the source for the global snow/temperature overlays.
+    st.session_state["analysis_cache_key"] = ""
+
+
+def current_tile_layers(region: list[float], is_connected: bool) -> list[dict]:
+    """Recreate expiring GEE URLs on load without storing raster bytes in Supabase."""
+    if not is_connected:
+        return []
+    catalogue = st.session_state["image_layers"]
+    runtime = st.session_state["runtime_tiles"]
+    for spec in catalogue:
+        if spec["id"] in runtime:
+            continue
+        try:
+            runtime[spec["id"]] = image_rgb_tile(spec, region)
+        except Exception as exc:
+            st.warning(f"Слой «{spec['name']}» пока недоступен: {exc}")
+    active_ids = {spec["id"] for spec in catalogue}
+    for obsolete in list(runtime):
+        if obsolete not in active_ids:
+            del runtime[obsolete]
+    if not catalogue:
+        st.session_state["analysis_tiles"] = []
+        st.session_state["analysis_cache_key"] = ""
+        return []
+
+    latest = catalogue[-1]
+    analysis_key = latest["id"] + ":" + ",".join(map(str, region))
+    if st.session_state.get("analysis_cache_key") != analysis_key:
+        try:
+            analysis, warnings = analysis_overlay_tiles(latest, region)
+            st.session_state["analysis_tiles"] = analysis
             st.session_state["warnings"] = warnings
-        st.session_state["pending_restore"] = False
-    except Exception as exc:
-        st.session_state["pending_restore"] = False
-        st.warning(f"Не удалось восстановить спутниковый слой: {exc}")
+        except Exception as exc:
+            st.session_state["analysis_tiles"] = []
+            st.session_state["warnings"] = [f"Анализ снега не загружен: {exc}"]
+        st.session_state["analysis_cache_key"] = analysis_key
+    return [runtime[spec["id"]] for spec in catalogue if spec["id"] in runtime] + (
+        st.session_state["analysis_tiles"]
+    )
+
 
 st.title("Анализ снежной обстановки")
 st.caption(

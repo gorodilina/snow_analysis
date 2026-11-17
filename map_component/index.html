@@ -68,6 +68,11 @@ let activeResizeObserver = null;
 let activeResizeHandler = null;
 let lastRenderId = null;
 let activeSnapshotTimer = null;
+let mapEventCounter = 0;
+function nextMapEventId() {
+  // Distinct even if two captures occur during the same millisecond.
+  return String(Date.now()) + '-' + String(++mapEventCounter);
+}
 function setComponentValue(value) {
   window.parent.postMessage({
     isStreamlitMessage: true,
@@ -120,7 +125,7 @@ function reportChange() {
   if (!canReportChanges) return;
   clearTimeout(activeSnapshotTimer);
   activeSnapshotTimer=setTimeout(()=>{
-    setComponentValue({map_state:collectState(), event_id:Date.now()});
+    setComponentValue({map_state:collectState(), event_id:nextMapEventId()});
   },700);
 }
 
@@ -340,7 +345,7 @@ function addCheck(name, layer, initial, opacity, option={}) {
       clearTimeout(activeSnapshotTimer);
       setComponentValue({
         action:'delete_layer',layer_id:image.id,
-        map_state:collectState(),event_id:Date.now()
+        map_state:collectState(),event_id:nextMapEventId()
       });
     };
     head.append(del);
@@ -450,7 +455,7 @@ map.on('mouseup',e=>{
   setSelectedBounds([west,south,east,north]);
   setComponentValue({
     action:'area_selected', bounds:chosenBounds,
-    map_state:collectState(), event_id:Date.now()
+    map_state:collectState(), event_id:nextMapEventId()
   });
 });
 saveAreaButton.onclick=async()=>{
@@ -500,7 +505,7 @@ saveAreaButton.onclick=async()=>{
     setComponentValue({
       action:'capture_image', image_data:imageData,
       image_format:fmt,bounds:chosenBounds,
-      map_state:collectState(),event_id:Date.now()
+      map_state:collectState(),event_id:nextMapEventId()
     });
     captureStatus.textContent='Снимок отправлен в галерею';
   } catch(error) {

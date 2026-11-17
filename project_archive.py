@@ -7,7 +7,7 @@ import re
 import zipfile
 from datetime import datetime, timezone
 
-from project_layers import normalize_layers
+from project_layers import normalize_layers, migrate_legacy_selection
 from session_store import normalize_payload, SessionStorageError
 
 MAX_IMPORT_BYTES = 5 * 1024 * 1024
@@ -77,7 +77,8 @@ def import_project_zip(data: bytes) -> dict:
                 raise SessionStorageError("Файл project.json слишком большой.")
             obj = json.loads(z.read("project.json"))
         clean = normalize_payload(obj)
-        clean["layers"] = normalize_layers(clean.get("layers", []))
+        layers = clean.get("layers") or migrate_legacy_selection(clean.get("selection"))
+        clean["layers"] = normalize_layers(layers)
         return clean
     except (zipfile.BadZipFile, UnicodeDecodeError, ValueError, KeyError) as exc:
         raise SessionStorageError("Не удалось прочитать архив проекта.") from exc

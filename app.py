@@ -369,28 +369,23 @@ with st.sidebar:
                 scene_items = [s for s in available if s["date"] == chosen]
                 scene_choices = ["Все сцены этой даты"] + [s["label"] for s in scene_items]
                 choice = st.selectbox("Сцена", scene_choices)
-                if st.button("Показать снимок", disabled=not connected, type="primary", use_container_width=True):
-                    image_id = None if choice == scene_choices[0] else scene_items[scene_choices.index(choice)-1]["image_id"]
-                    if choice != scene_choices[0] and not image_id:
-                        st.error("Нет ID сцены. Выберите все сцены этой даты.")
+                if st.button("Добавить снимок как слой", disabled=not connected,
+                             type="primary", use_container_width=True):
+                    index = scene_choices.index(choice)
+                    image_id = None if index == 0 else scene_items[index - 1]["image_id"]
+                    if index != 0 and not image_id:
+                        st.error("У выбранной сцены отсутствует ID GEE.")
                     else:
-                        with st.spinner("Создаю картографические слои..."):
+                        with st.spinner("Добавляю независимый слой снимка..."):
                             try:
-                                day = date.fromisoformat(chosen)
-                                raw = scene_image(satellite, bbox, day, image_id, mask_clouds=False)
-                                masked = scene_image(satellite, bbox, day, image_id, mask_clouds=True)
-                                tiles, warnings = build_tile_layers(raw, bbox, day, masked)
-                                st.session_state["tiles"] = tiles
-                                st.session_state["image_caption"] = (
-                                    f"{satellite} · {chosen} · {choice}"
+                                spec = new_scene_layer(
+                                    satellite, date.fromisoformat(chosen), image_id,
+                                    "" if index == 0 else scene_items[index - 1]["time"],
                                 )
-                                st.session_state["warnings"] = warnings
-                                st.session_state["selection"] = {
-                                    "kind": "scene", "satellite": satellite,
-                                    "day": chosen, "image_id": image_id,
-                                }
+                                add_image_layer(spec, bbox)
+                                st.caption(f"Добавлен слой: {spec['name']}")
                             except Exception as exc:
-                                st.error(f"Ошибка при создании снимка: {exc}")
+                                st.error(f"Ошибка добавления слоя: {exc}")
             else:
                 st.caption("Для выбранного месяца снимков не найдено.")
         else:
@@ -421,28 +416,17 @@ with st.sidebar:
             except Exception as exc:
                 st.warning(f"Не удалось определить количество сцен: {exc}")
         if st.button(
-            "Показать медиану",
-            disabled=(not connected or count == 0),
+            "Добавить медиану как слой",
+            disabled=(not connected or count is None or count == 0),
             type="primary", use_container_width=True
         ):
-            with st.spinner("Создаю медианную мозаику..."):
+            with st.spinner("Добавляю медианную мозаику отдельным слоем..."):
                 try:
-                    raw, masked, actual_count = median_images(
-                        satellite, bbox, median_start, median_length, count=count
-                    )
-                    tiles, warnings = build_tile_layers(raw, bbox, median_start, masked)
-                    st.session_state["tiles"] = tiles
-                    st.session_state["image_caption"] = (
-                        f"Медиана {satellite} · {median_start}–{median_end} · "
-                        f"{actual_count} сцен"
-                    )
-                    st.session_state["warnings"] = warnings
-                    st.session_state["selection"] = {
-                        "kind": "median", "satellite": satellite,
-                        "start": median_start.isoformat(), "length": median_length,
-                    }
+                    spec = new_median_layer(satellite, median_start, median_length)
+                    add_image_layer(spec, bbox)
+                    st.caption(f"Добавлен слой: {spec['name']} · {count} сцен")
                 except Exception as exc:
-                    st.error(f"Ошибка при расчёте медианы: {exc}")
+                    st.error(f"Ошибка добавления медианы: {exc}")
 
     st.divider()
     st.subheader("4. Заметки")

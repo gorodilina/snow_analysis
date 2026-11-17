@@ -24,11 +24,28 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
 .base-opt input{accent-color:#2667b7}
 .label-icon{white-space:nowrap;background:rgba(255,255,255,.88);font-weight:600;color:#222;padding:2px 5px;border:1px solid #5558;border-radius:4px;font-size:11px;text-shadow:0 1px 1px #fff;box-shadow:0 1px 3px #0002}
 .leaflet-control-attribution{font-size:9px !important}
+#capture-control{position:absolute;z-index:10000000;top:12px;left:58px;max-width:calc(100% - 410px);display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#fff;padding:7px;border:1px solid #ccd3d9;border-radius:9px;box-shadow:0 2px 8px #0002;font-size:12px}
+#capture-control button,#capture-control select{font:inherit;border:1px solid #b8c5cf;background:#fff;border-radius:5px;padding:5px 7px;cursor:pointer;color:#1c2930}
+#capture-control button:disabled{opacity:.45;cursor:default}
+#capture-status{font-size:11px;color:#475569}
+#layer-control{z-index:10000001}
+#top-note{z-index:10000000}
+@media(max-width:780px){#capture-control{top:65px;left:10px;max-width:calc(100% - 20px)}#layer-control{width:220px}}
 #top-note{position:absolute;z-index:900;bottom:28px;left:12px;background:#fffffff0;padding:7px 10px;border-radius:7px;font-size:12px;max-width:65%;pointer-events:none;box-shadow:0 1px 6px #0002}
 </style>
 </head>
 <body>
 <div id="map"></div>
+<div id="capture-control">
+  <button type="button" id="select-area">▢ Выделить область</button>
+  <select id="capture-format" aria-label="Формат снимка">
+    <option value="png">PNG</option>
+    <option value="jpg">JPG</option>
+  </select>
+  <button type="button" id="save-area" disabled>В галерею</button>
+  <button type="button" id="cancel-area">✕</button>
+  <span id="capture-status"></span>
+</div>
 <div id="layer-control">
   <button id="layers-head" type="button"><span>☷ Слои карты</span><span id="arrow">▾</span></button>
   <div id="layers-body">
@@ -42,6 +59,7 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
 </div>
 <div id="top-note"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js" crossorigin="anonymous"></script>
 <script>
 'use strict';
 // v1 bidirectional Streamlit component: the parent sends config on render.
@@ -72,6 +90,9 @@ document.getElementById('overlays').replaceChildren();
 document.getElementById('image-overlays').replaceChildren();
 const restored = config.mapState || {};
 let canReportChanges = false;
+let drawingArea = false, originLatLng = null, areaRect = null;
+let chosenBounds = Array.isArray(restored.selection_bounds) ? restored.selection_bounds : null;
+let captureBusy = false;
 function collectState() {
   const c=map.getCenter();
   const namedBase=Object.keys(bases).find(name=>bases[name]===currentBase) || 'Рельеф (Esri)';
@@ -87,6 +108,7 @@ function collectState() {
     base:namedBase,
     overlays:layerState,
     analysis_visible:analysisVisible,
+    selection_bounds:chosenBounds,
     track:map.hasLayer(routeGroup),
     points:map.hasLayer(pointGroup),
     labels:map.hasLayer(labelGroup),
@@ -121,10 +143,10 @@ for (const [pane,offset] of [['routePane',0],['pointPane',1],['labelPane',2]]) {
   map.getPane(pane).style.zIndex=String(routeZ+offset);
 }
 const bases = {
-  'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
-  'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
-  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,attribution:'© OpenStreetMap contributors'}),
-  'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Imagery © Esri and providers'})
+  'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,crossOrigin:true,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
+  'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,crossOrigin:true,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,crossOrigin:true,attribution:'© OpenStreetMap contributors'}),
+  'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,crossOrigin:true,attribution:'Imagery © Esri and providers'})
 };
 // The official Google Map Tiles API requires a paid Maps Platform project,
 // enabled Map Tiles API and a separately restricted GOOGLE_MAPS_API_KEY.
@@ -132,7 +154,7 @@ const bases = {
 const googleConfig = config.googleTerrain || {};
 if (googleConfig.url) {
   bases['Google Terrain'] = L.tileLayer(googleConfig.url, {
-    maxZoom:20,
+    maxZoom:20,crossOrigin:true,
     attribution: '© Google Maps · ' + escGoogleAttribution(googleConfig.attribution || 'Map data © Google Maps')
   });
 }
@@ -368,6 +390,122 @@ outlineCheck.onchange=()=>{
 addCheck('Трек',routeGroup,restored.track !== false,null);
 addCheck('Точки / препятствия',pointGroup,restored.points !== false,null);
 addCheck('Подписи точек',labelGroup,restored.labels === true,null);
+// The selection rectangle is intentionally above image layers but omitted
+// from the gallery screenshot itself. Coordinates are WGS84 [W,S,E,N].
+const captureStatus=document.getElementById('capture-status');
+const saveAreaButton=document.getElementById('save-area');
+function setSelectedBounds(bounds) {
+  chosenBounds=bounds;
+  if(areaRect) map.removeLayer(areaRect);
+  if(bounds) {
+    areaRect=L.rectangle([[bounds[1],bounds[0]],[bounds[3],bounds[2]]],{
+      pane:'routePane',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+    }).addTo(map);
+    saveAreaButton.disabled=false;
+    captureStatus.textContent='Область выбрана';
+  } else {
+    areaRect=null;
+    saveAreaButton.disabled=true;
+    captureStatus.textContent='';
+  }
+}
+if(chosenBounds) setSelectedBounds(chosenBounds);
+document.getElementById('select-area').onclick=()=>{
+  if(captureBusy) return;
+  drawingArea=true;
+  originLatLng=null;
+  map.dragging.disable();
+  captureStatus.textContent='Протяните прямоугольник мышью по карте';
+};
+document.getElementById('cancel-area').onclick=()=>{
+  drawingArea=false;originLatLng=null;map.dragging.enable();
+  setSelectedBounds(null);reportChange();
+};
+map.on('mousedown',e=>{
+  if(!drawingArea || (e.originalEvent && e.originalEvent.button!==0)) return;
+  originLatLng=e.latlng;
+  setSelectedBounds(null);
+});
+map.on('mousemove',e=>{
+  if(!drawingArea || !originLatLng) return;
+  const west=Math.min(originLatLng.lng,e.latlng.lng);
+  const east=Math.max(originLatLng.lng,e.latlng.lng);
+  const south=Math.min(originLatLng.lat,e.latlng.lat);
+  const north=Math.max(originLatLng.lat,e.latlng.lat);
+  if(areaRect)map.removeLayer(areaRect);
+  areaRect=L.rectangle([[south,west],[north,east]],{
+    pane:'routePane',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+  }).addTo(map);
+});
+map.on('mouseup',e=>{
+  if(!drawingArea || !originLatLng) return;
+  const west=Math.min(originLatLng.lng,e.latlng.lng);
+  const east=Math.max(originLatLng.lng,e.latlng.lng);
+  const south=Math.min(originLatLng.lat,e.latlng.lat);
+  const north=Math.max(originLatLng.lat,e.latlng.lat);
+  drawingArea=false;originLatLng=null;map.dragging.enable();
+  if(Math.abs(east-west)<0.00001 || Math.abs(north-south)<0.00001) {
+    setSelectedBounds(null);return;
+  }
+  setSelectedBounds([west,south,east,north]);
+  setComponentValue({
+    action:'area_selected', bounds:chosenBounds,
+    map_state:collectState(), event_id:Date.now()
+  });
+});
+saveAreaButton.onclick=async()=>{
+  if(captureBusy || !chosenBounds) return;
+  if(typeof window.html2canvas!=='function') {
+    captureStatus.textContent='Сервис снимка карты недоступен';return;
+  }
+  captureBusy=true;saveAreaButton.disabled=true;
+  captureStatus.textContent='Сохраняю изображение…';
+  try {
+    const southWest=map.latLngToContainerPoint([chosenBounds[1],chosenBounds[0]]);
+    const northEast=map.latLngToContainerPoint([chosenBounds[3],chosenBounds[2]]);
+    const left=Math.max(0,Math.min(southWest.x,northEast.x));
+    const top=Math.max(0,Math.min(southWest.y,northEast.y));
+    const right=Math.min(map.getSize().x,Math.max(southWest.x,northEast.x));
+    const bottom=Math.min(map.getSize().y,Math.max(southWest.y,northEast.y));
+    if(right-left<12 || bottom-top<12) throw Error('Слишком маленькая область.');
+    const originalRect=areaRect;
+    if(originalRect)map.removeLayer(originalRect);
+    let canvas;
+    try {
+      canvas=await window.html2canvas(map.getContainer(),{
+        useCORS:true,allowTaint:false,backgroundColor:'#f4f4f4',
+        logging:false,scale:Math.min(2,window.devicePixelRatio||1),
+        ignoreElements:el=>el.classList && el.classList.contains('leaflet-control-container')
+      });
+    } finally {
+      if(originalRect)originalRect.addTo(map);
+    }
+    const sx=canvas.width/map.getSize().x;
+    const sy=canvas.height/map.getSize().y;
+    const sw=Math.ceil((right-left)*sx),sh=Math.ceil((bottom-top)*sy);
+    const reduce=Math.min(1,Math.sqrt(3000000/(sw*sh)));
+    const finalCanvas=document.createElement('canvas');
+    finalCanvas.width=Math.max(1,Math.floor(sw*reduce));
+    finalCanvas.height=Math.max(1,Math.floor(sh*reduce));
+    finalCanvas.getContext('2d').drawImage(
+      canvas,left*sx,top*sy,sw,sh,0,0,finalCanvas.width,finalCanvas.height
+    );
+    const fmt=document.getElementById('capture-format').value;
+    const mime=fmt==='jpg'?'image/jpeg':'image/png';
+    const imageData=finalCanvas.toDataURL(mime,fmt==='jpg'?.85:undefined);
+    if(imageData.length>2800000)throw Error('Скриншот более 2 МБ. Выберите JPG либо меньшую область.');
+    setComponentValue({
+      action:'capture_image', image_data:imageData,
+      image_format:fmt,bounds:chosenBounds,
+      map_state:collectState(),event_id:Date.now()
+    });
+    captureStatus.textContent='Снимок отправлен в галерею';
+  } catch(error) {
+    captureStatus.textContent='Ошибка: '+String(error.message||error).slice(0,130);
+  } finally {
+    captureBusy=false;saveAreaButton.disabled=!chosenBounds;
+  }
+};
 const bounds=config.bounds;
 if (restored.center && Array.isArray(restored.center) && restored.center.length===2 && Number.isFinite(Number(restored.zoom))) {
   map.setView(restored.center, restored.zoom);

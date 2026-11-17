@@ -490,9 +490,30 @@ with st.sidebar:
         except (SessionStorageError, ValueError) as exc:
             st.error(f"Не удалось сохранить исследование: {exc}")
 
+    st.divider()
+    st.caption(f"Открыто спутниковых слоёв: {len(st.session_state['image_layers'])}. "
+               "Удаление, прозрачность и видимость — в «Слоях карты».")
+    if st.button("Обновить спутниковые тайлы", disabled=not connected,
+                 use_container_width=True):
+        st.session_state["runtime_tiles"] = {}
+        st.session_state["analysis_cache_key"] = ""
+        st.session_state["analysis_tiles"] = []
+        st.rerun()
+    try:
+        st.download_button(
+            "Скачать исследование (ZIP)",
+            data=build_project_zip(research_payload(routes, points)),
+            file_name=safe_export_filename(st.session_state.get("research_name", "")),
+            mime="application/zip",
+            use_container_width=True,
+            help="Сохраняются все треки, точки, заметки, снимки и настройки. "
+                 "Растровые файлы не включаются.",
+        )
+    except (SessionStorageError, ValueError, TypeError) as exc:
+        st.warning(f"Экспорт проекта недоступен: {exc}")
     st.caption(
-        "Прозрачность снимка, подписи точек, маску облаков и подложку "
-        "можно менять прямо в «Слоях карты»."
+        "Снимки накладываются друг на друга, новейший выше. "
+        "Граница снега и изотермы относятся к последнему добавленному снимку."
     )
 
 if connection_error:
@@ -500,8 +521,13 @@ if connection_error:
         st.write(connection_error)
         st.caption("Секреты не нужно добавлять в GitHub.")
 
-caption = st.session_state.get("image_caption", "Трек без спутникового снимка")
-tiles = st.session_state.get("tiles", [])
+caption = (
+    f"Слоёв спутниковых снимков: {len(st.session_state['image_layers'])}."
+    + (f" Снег и изотермы: {st.session_state['image_layers'][-1]['name']}."
+       if st.session_state["image_layers"] else
+       " Добавьте снимок или медиану в панели слева.")
+)
+tiles = current_tile_layers(bbox, connected)
 google_terrain = None
 maps_key = setting("GOOGLE_MAPS_API_KEY", "")
 if maps_key:
@@ -526,16 +552,33 @@ render_id = hashlib.sha256(
     ).encode()
 ).hexdigest()[:24]
 map_event = research_map(config=config, render_id=render_id)
-if isinstance(map_event, dict) and isinstance(map_event.get("map_state"), dict):
-    st.session_state["map_state"] = map_event["map_state"]
+if isinstance(map_event, dict):
+    if isinstance(map_event.get("map_state"), dict):
+        st.session_state["map_state"] = map_event["map_state"]
+    if map_event.get("action") == "delete_layer":
+        ident = map_event.get("layer_id", "")
+        if ident and ident != st.session_state.get("last_deleted_image_id"):
+            old_count = len(st.session_state["image_layers"])
+            st.session_state["image_layers"] = [
+                item for item in st.session_state["image_layers"]
+                if item["id"] != ident
+            ]
+            if len(st.session_state["image_layers"]) != old_count:
+                st.session_state["last_deleted_image_id"] = ident
+                st.session_state["runtime_tiles"].pop(ident, None)
+                st.session_state["analysis_cache_key"] = ""
+                st.session_state["analysis_tiles"] = []
+                st.session_state.get("map_state", {}).get("overlays", {}).pop(ident, None)
+                st.rerun()
 
 for warning in st.session_state.get("warnings", []):
     st.warning(warning)
 if tiles:
     st.caption(
-        "Снимок без облачной маски включён по умолчанию. "
-        "Граница снега по NDSI может включать ледники. "
-        "Изотермы ERA5-Land являются модельной оценкой."
+        "Каждый снимок отображается без облачной маски. "
+        "Граница снега по NDSI может включать ледники и вычисляется "
+        "с маской облаков по последнему добавленному снимку. "
+        "Изотермы ERA5-Land — модельная оценка."
     )
 
 # Autosave if the state has actually changed. No credentials or tile URLs

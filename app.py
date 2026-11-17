@@ -508,9 +508,15 @@ with st.sidebar:
     gallery_items = st.session_state["gallery"]
     st.caption(f"Сохранённых изображений: {len(gallery_items)}.")
     if gallery_items:
+        gallery_ids = [item["id"] for item in gallery_items]
+        # A deleted photo (or a ZIP/session import) may leave the old selectbox
+        # value in Streamlit's widget state. Reconcile it BEFORE constructing
+        # the widget, otherwise the list lookup below raises StopIteration.
+        if st.session_state.get("gallery_selected_id") not in gallery_ids:
+            st.session_state["gallery_selected_id"] = gallery_ids[0]
         selected_id = st.selectbox(
             "Просмотр фотографии",
-            [item["id"] for item in gallery_items],
+            gallery_ids,
             format_func=lambda ident: next(
                 (f"{i+1}. {item['title'] or 'Без названия'}"
                  for i, item in enumerate(gallery_items) if item["id"] == ident),
@@ -518,7 +524,12 @@ with st.sidebar:
             ),
             key="gallery_selected_id",
         )
-        gallery_item = next(i for i in gallery_items if i["id"] == selected_id)
+        # Defensive fallback for frontend widget-state races after deletion.
+        gallery_item = next(
+            (item for item in gallery_items if item["id"] == selected_id),
+            gallery_items[0],
+        )
+        selected_id = gallery_item["id"]
         try:
             st.image(gallery_image_bytes(gallery_item), use_container_width=True)
         except SessionStorageError as exc:
@@ -548,7 +559,8 @@ with st.sidebar:
                     item for item in gallery_items if item["id"] != selected_id
                 ]
                 st.session_state["gallery_blobs"].pop(selected_id, None)
-                st.session_state.pop("gallery_selected_id", None)
+                # Do not mutate a selectbox key after its widget has been
+                # instantiated in this run; reconcile on the next rerun.
                 st.session_state["gallery_export_bytes"] = None
                 st.rerun()
             except SessionStorageError as exc:
@@ -582,6 +594,7 @@ with st.sidebar:
                 use_container_width=True,
             )
     else:
+        st.session_state.pop("gallery_selected_id", None)
         st.caption("Пока пусто. Можно сохранять несколько областей карты.")
 
     st.divider()

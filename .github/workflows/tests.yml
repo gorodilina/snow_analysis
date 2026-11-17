@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - feature/shareable-research-sessions
+      - feature/multilayer-snow-projects
   pull_request:
     branches:
       - main
@@ -22,7 +23,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
       - name: Compile Python
-        run: python -m compileall -q app.py gee_client.py geo_utils.py google_terrain.py map_builder.py map_component.py session_store.py tests
+        run: python -m compileall -q app.py gee_client.py geo_utils.py google_terrain.py map_builder.py map_component.py session_store.py project_layers.py project_archive.py tests
       - name: Unit tests
         run: python -m pytest tests -q
       - name: Smoke-test Streamlit application

@@ -105,3 +105,33 @@ def test_geotiff_grid_is_bounded():
     assert suggested_scale("Landsat 8/9") == 30
     w, h = estimate_grid([46, 42, 46.02, 42.01], 20)
     assert 70 < w < 100 and 50 < h < 65
+
+
+def test_streamlit_recovers_stale_gallery_selection_after_deletion_or_restore():
+    """Reproduce Streamlit StopIteration when selectbox ID outlives the photo."""
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("app.py", default_timeout=30).run()
+    assert not at.exception
+
+    first, first_bytes = example()
+    at.session_state["gallery"] = [first]
+    at.session_state["gallery_blobs"] = {first["id"]: first_bytes}
+    at.session_state["gallery_selected_id"] = "gal_00000000000000000000"  # deleted ID
+    at.run()
+    assert not at.exception
+    assert at.session_state["gallery_selected_id"] == first["id"]
+
+    # Delete all pictures, then restore a different collection.
+    at.session_state["gallery"] = []
+    at.run()
+    assert not at.exception
+    assert "gallery_selected_id" not in at.session_state
+
+    another, another_bytes = example()
+    at.session_state["gallery"] = [another]
+    at.session_state["gallery_blobs"] = {another["id"]: another_bytes}
+    at.session_state["gallery_selected_id"] = first["id"]
+    at.run()
+    assert not at.exception
+    assert at.session_state["gallery_selected_id"] == another["id"]

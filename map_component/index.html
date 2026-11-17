@@ -463,10 +463,13 @@ saveAreaButton.onclick=async()=>{
   try {
     const southWest=map.latLngToContainerPoint([chosenBounds[1],chosenBounds[0]]);
     const northEast=map.latLngToContainerPoint([chosenBounds[3],chosenBounds[2]]);
-    const left=Math.max(0,Math.min(southWest.x,northEast.x));
-    const top=Math.max(0,Math.min(southWest.y,northEast.y));
-    const right=Math.min(map.getSize().x,Math.max(southWest.x,northEast.x));
-    const bottom=Math.min(map.getSize().y,Math.max(southWest.y,northEast.y));
+    const minX=Math.min(southWest.x,northEast.x),maxX=Math.max(southWest.x,northEast.x);
+    const minY=Math.min(southWest.y,northEast.y),maxY=Math.max(southWest.y,northEast.y);
+    const size=map.getSize();
+    if(minX < -1 || minY < -1 || maxX > size.x + 1 || maxY > size.y + 1)
+      throw Error('Область не целиком на экране. Выделите её заново.');
+    const left=Math.max(0,minX),top=Math.max(0,minY);
+    const right=Math.min(size.x,maxX),bottom=Math.min(size.y,maxY);
     if(right-left<12 || bottom-top<12) throw Error('Слишком маленькая область.');
     const originalRect=areaRect;
     if(originalRect)map.removeLayer(originalRect);

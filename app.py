@@ -745,22 +745,64 @@ render_id = hashlib.sha256(
 ).hexdigest()[:24]
 map_event = research_map(config=config, render_id=render_id)
 if isinstance(map_event, dict):
-    if isinstance(map_event.get("map_state"), dict):
-        st.session_state["map_state"] = map_event["map_state"]
-    if map_event.get("action") == "delete_layer":
+    previous_state = st.session_state.get("map_state", {})
+    incoming_state = map_event.get("map_state")
+    if isinstance(incoming_state, dict):
+        st.session_state["map_state"] = incoming_state
+    changed_analysis = (
+        isinstance(incoming_state, dict)
+        and bool(previous_state.get("analysis_visible", False))
+            != bool(incoming_state.get("analysis_visible", False))
+    )
+    action = map_event.get("action")
+    event_id = map_event.get("event_id")
+    is_fresh = event_id is not None and event_id != st.session_state.get("processed_map_event")
+    if action == "delete_layer" and is_fresh:
+        st.session_state["processed_map_event"] = event_id
         ident = map_event.get("layer_id", "")
-        if ident and ident != st.session_state.get("last_deleted_image_id"):
-            old_count = len(st.session_state["image_layers"])
-            st.session_state["image_layers"] = [
-                item for item in st.session_state["image_layers"]
-                if item["id"] != ident
-            ]
-            if len(st.session_state["image_layers"]) != old_count:
-                st.session_state["last_deleted_image_id"] = ident
-                st.session_state["runtime_tiles"].pop(ident, None)
-                st.session_state["analysis_tiles"].pop(ident, None)
-                st.session_state.get("map_state", {}).get("overlays", {}).pop(ident, None)
-                st.rerun()
+        old_count = len(st.session_state["image_layers"])
+        st.session_state["image_layers"] = [
+            item for item in st.session_state["image_layers"]
+            if item["id"] != ident
+        ]
+        if len(st.session_state["image_layers"]) != old_count:
+            st.session_state["runtime_tiles"].pop(ident, None)
+            st.session_state["analysis_tiles"].pop(ident, None)
+            st.session_state.get("map_state", {}).get("overlays", {}).pop(ident, None)
+            st.rerun()
+    elif action == "area_selected" and is_fresh:
+        st.session_state["processed_map_event"] = event_id
+        try:
+            bounds = validate_bounds(map_event.get("bounds"))
+            st.session_state["map_state"]["selection_bounds"] = bounds
+            st.rerun()
+        except SessionStorageError as exc:
+            st.warning(f"Не удалось выбрать область: {exc}")
+    elif action == "capture_image" and is_fresh:
+        st.session_state["processed_map_event"] = event_id
+        try:
+            bounds = validate_bounds(map_event.get("bounds"))
+            fmt = map_event.get("image_format", "png")
+            blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
+            item = new_gallery_item(bounds, fmt)
+            token = st.session_state.get("active_token")
+            if token and gallery_store:
+                try:
+                    item["storage_key"] = gallery_store.put(token, item, blob)
+                except SessionStorageError as exc:
+                    st.warning(f"Фото осталось только в текущей вкладке: {exc}")
+            st.session_state["gallery_blobs"][item["id"]] = blob
+            st.session_state["gallery"].append(item)
+            st.session_state["gallery_export_bytes"] = None
+            st.session_state["project_backup_bytes"] = None
+            st.session_state["map_state"]["selection_bounds"] = bounds
+            st.rerun()
+        except (SessionStorageError, ValueError, TypeError) as exc:
+            st.error(f"Не удалось добавить изображение в галерею: {exc}")
+    elif changed_analysis:
+        # Server must request missing GEE contour URLs when all contours are
+        # switched on; switching off also drops them from the map payload.
+        st.rerun()
 
 for warning in st.session_state.get("warnings", []):
     st.warning(warning)
@@ -782,7 +824,14 @@ if store and token:
             json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode()
         ).hexdigest()
         if snapshot_digest != st.session_state.get("last_saved_digest"):
-            store.save(token, snapshot)
-            st.session_state["last_saved_digest"] = snapshot_digest
+            if any(not image.get("storage_key") for image in st.session_state["gallery"]):
+                st.warning(
+                    "Некоторые фотографии галереи пока только в памяти. "
+                    "Выполните supabase_gallery_setup.sql и повторите загрузку; "
+                    "пока вся сессия не будет записана в Supabase."
+                )
+            else:
+                store.save(token, snapshot)
+                st.session_state["last_saved_digest"] = snapshot_digest
     except (SessionStorageError, ValueError, TypeError) as exc:
         st.warning(f"Автосохранение не выполнено: {exc}")

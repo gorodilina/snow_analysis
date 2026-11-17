@@ -109,9 +109,12 @@ def test_geotiff_grid_is_bounded():
 
 def test_streamlit_recovers_stale_gallery_selection_after_deletion_or_restore():
     """Reproduce Streamlit StopIteration when selectbox ID outlives the photo."""
+    from pathlib import Path
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_file("app.py", default_timeout=30).run()
+    at = AppTest.from_file(
+        Path(__file__).resolve().parents[1] / "app.py", default_timeout=30
+    ).run()
     assert not at.exception
 
     first, first_bytes = example()

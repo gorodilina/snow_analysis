@@ -523,6 +523,7 @@ with st.sidebar:
             st.image(gallery_image_bytes(gallery_item), use_container_width=True)
         except SessionStorageError as exc:
             st.warning(str(exc))
+        old_title, old_note = gallery_item["title"], gallery_item["note"]
         gallery_item["title"] = st.text_input(
             "Название изображения (необязательно)",
             value=gallery_item["title"],
@@ -536,6 +537,9 @@ with st.sidebar:
             key="gallery_note_" + selected_id,
             height=80,
         )
+        if (gallery_item["title"], gallery_item["note"]) != (old_title, old_note):
+            st.session_state["gallery_export_bytes"] = None
+            st.session_state["project_backup_bytes"] = None
         if st.button("Удалить это изображение", use_container_width=True):
             try:
                 if gallery_item.get("storage_key") and gallery_store:
@@ -544,6 +548,7 @@ with st.sidebar:
                     item for item in gallery_items if item["id"] != selected_id
                 ]
                 st.session_state["gallery_blobs"].pop(selected_id, None)
+                st.session_state.pop("gallery_selected_id", None)
                 st.session_state["gallery_export_bytes"] = None
                 st.rerun()
             except SessionStorageError as exc:
@@ -683,7 +688,7 @@ with st.sidebar:
                     st.session_state["geotiff_name"] = (
                         source_spec["id"] + "_" + str(scale) + "m.tif"
                     )
-                except (SessionStorageError, Exception) as exc:
+                except Exception as exc:
                     st.error(f"Не удалось создать GeoTIFF: {exc}")
         if st.session_state.get("geotiff_bytes"):
             st.download_button(

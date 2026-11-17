@@ -10,14 +10,19 @@ from pathlib import Path
 import streamlit as st
 
 from gee_client import (
-    EarthEngineUnavailable, LANDSAT, SENTINEL, build_tile_layers,
-    initialize_ee, list_month_scenes, median_images, scene_image,
-    count_interval_scenes,
+    LANDSAT, SENTINEL, initialize_ee, list_month_scenes,
+    count_interval_scenes, image_rgb_tile, analysis_overlay_tiles,
 )
 from geo_utils import GeoInputError, read_geo, search_geometry
 from google_terrain import get_google_terrain
 from map_builder import map_config
 from map_component import research_map
+from project_layers import (
+    migrate_legacy_selection, new_median_layer, new_scene_layer, normalize_layers,
+)
+from project_archive import (
+    build_project_zip, import_project_zip, safe_export_filename,
+)
 from session_store import SessionStorageError, SessionStore, valid_token
 
 ROOT = Path(__file__).resolve().parent
@@ -79,12 +84,26 @@ def apply_research_payload(payload: dict):
     st.session_state["saved_points"] = payload.get("points") or []
     st.session_state["notes"] = payload.get("notes") or []
     st.session_state["manual_points"] = []
+    # Rotate the uploader key instead of writing into a non-settable file widget.
+    st.session_state["geo_uploader_revision"] = st.session_state.get("geo_uploader_revision", 0) + 1
     st.session_state["map_state"] = payload.get("map_state") or {}
-    st.session_state["selection"] = payload.get("selection")
-    st.session_state["tiles"] = []
+    # Migrate sessions created before multiple independent imagery layers.
+    existing_layers = payload.get("layers")
+    use_legacy = not existing_layers and isinstance(payload.get("selection"), dict)
+    st.session_state["image_layers"] = normalize_layers(
+        migrate_legacy_selection(payload["selection"]) if use_legacy
+        else (existing_layers if isinstance(existing_layers, list) else [])
+    )
+    if use_legacy and st.session_state["image_layers"]:
+        old_overlays = st.session_state["map_state"].get("overlays", {})
+        old_rgb = old_overlays.get("Снимок без маски") or old_overlays.get("Спутниковый снимок")
+        if isinstance(old_rgb, dict):
+            old_overlays[st.session_state["image_layers"][0]["id"]] = old_rgb
+    st.session_state["runtime_tiles"] = {}
+    st.session_state["analysis_tiles"] = []
+    st.session_state["analysis_cache_key"] = ""
     st.session_state["image_caption"] = ""
     st.session_state["warnings"] = []
-    st.session_state["pending_restore"] = bool(payload.get("selection"))
     ui = payload.get("ui") or {}
     for key in ["satellite", "mode", "year", "month", "median_length"]:
         if key in ui:
@@ -107,7 +126,7 @@ def research_payload(routes: list[dict], points: list[dict]) -> dict:
         "points": points,
         "notes": st.session_state.get("notes", []),
         "ui": ui,
-        "selection": st.session_state.get("selection"),
+        "layers": normalize_layers(st.session_state.get("image_layers", [])),
         "map_state": st.session_state.get("map_state", {}),
     }
 
@@ -153,17 +172,38 @@ st.session_state.setdefault("research_name", "Новое исследовани�
 st.session_state.setdefault("manual_points", [])
 st.session_state.setdefault("notes", [])
 st.session_state.setdefault("map_state", {})
-st.session_state.setdefault("selection", None)
+st.session_state.setdefault("image_layers", [])
+st.session_state.setdefault("runtime_tiles", {})
+st.session_state.setdefault("analysis_tiles", [])
+st.session_state.setdefault("analysis_cache_key", "")
+st.session_state.setdefault("warnings", [])
 
 with st.sidebar:
     st.title("🏔️ Анализ снежной обстановки")
     st.caption("Спутниковые снимки, граница снега и изотермы вдоль трека")
     st.subheader("1. Трек и точки")
+    # Import must run before widget keys are instantiated, so the restored
+    # satellite/date controls can be populated without Streamlit errors.
+    with st.expander("Восстановить проект из ZIP"):
+        archive_input = st.file_uploader(
+            "Архив исследования", type=["zip"], key="project_zip"
+        )
+        if st.button("Загрузить проект из ZIP", disabled=archive_input is None,
+                     use_container_width=True):
+            try:
+                apply_research_payload(import_project_zip(archive_input.getvalue()))
+                st.session_state.pop("active_token", None)
+                st.session_state.pop("last_saved_digest", None)
+                st.session_state["loaded_map_revision"] = "imported"
+                st.query_params.clear()
+                st.rerun()
+            except (SessionStorageError, ValueError, KeyError, TypeError) as exc:
+                st.error(f"Ошибка импорта проекта: {exc}")
     uploads = st.file_uploader(
         "Загрузить файлы KML или GPX",
         type=["kml", "gpx", "csv"],
         accept_multiple_files=True,
-        key="geo_files",
+        key=f"geo_files_{st.session_state.get('geo_uploader_revision', 0)}",
         help="Выберите несколько файлов одновременно. CSV — для точек.",
     )
 
@@ -226,10 +266,10 @@ if st.session_state.get("last_geo_hash") != geo_hash:
     st.session_state["last_geo_hash"] = geo_hash
     st.session_state.pop("scenes", None)
     st.session_state.pop("scene_query", None)
-    if not st.session_state.get("pending_restore"):
-        st.session_state["tiles"] = []
-        st.session_state["image_caption"] = ""
-        st.session_state["selection"] = None
+    # Keep the layer catalogue; refresh its temporary tiles for a new ROI.
+    st.session_state["runtime_tiles"] = {}
+    st.session_state["analysis_tiles"] = []
+    st.session_state["analysis_cache_key"] = ""
 
 bbox = search_geometry(routes, points if not routes else [], buffer_m=4500)["bbox"]
 
@@ -254,33 +294,52 @@ try:
 except Exception as exc:
     connection_error = str(exc)
 
-# Reconstruct Earth Engine map URLs when restoring a saved research link.
-# The short-lived GEE tile URLs themselves are not persisted.
-if st.session_state.get("pending_restore") and connected:
-    sel = st.session_state.get("selection") or {}
-    try:
-        with st.spinner("Восстанавливаю сохранённый снимок..."):
-            if sel.get("kind") == "scene":
-                day = date.fromisoformat(sel["day"])
-                raw = scene_image(sel["satellite"], bbox, day, sel.get("image_id"), mask_clouds=False)
-                masked = scene_image(sel["satellite"], bbox, day, sel.get("image_id"), mask_clouds=True)
-                caption = f"{sel['satellite']} · {day} · сохранённая сцена"
-            elif sel.get("kind") == "median":
-                day = date.fromisoformat(sel["start"])
-                raw, masked, count = median_images(
-                    sel["satellite"], bbox, day, int(sel["length"])
-                )
-                caption = f"Медианная мозаика · {sel['satellite']} · {count} сцен"
-            else:
-                raise ValueError("Неизвестный тип сохранённого снимка.")
-            tiles, warnings = build_tile_layers(raw, bbox, day, masked)
-            st.session_state["tiles"] = tiles
-            st.session_state["image_caption"] = caption
+def add_image_layer(spec: dict, region: list[float]) -> None:
+    """Create one GEE tile, then append the new independent image."""
+    tile = image_rgb_tile(spec, region)
+    st.session_state["image_layers"].append(spec)
+    st.session_state["runtime_tiles"][spec["id"]] = tile
+    # Latest image becomes the source for the global snow/temperature overlays.
+    st.session_state["analysis_cache_key"] = ""
+
+
+def current_tile_layers(region: list[float], is_connected: bool) -> list[dict]:
+    """Recreate expiring GEE URLs on load without storing raster bytes in Supabase."""
+    if not is_connected:
+        return []
+    catalogue = st.session_state["image_layers"]
+    runtime = st.session_state["runtime_tiles"]
+    for spec in catalogue:
+        if spec["id"] in runtime:
+            continue
+        try:
+            runtime[spec["id"]] = image_rgb_tile(spec, region)
+        except Exception as exc:
+            st.warning(f"Слой «{spec['name']}» пока недоступен: {exc}")
+    active_ids = {spec["id"] for spec in catalogue}
+    for obsolete in list(runtime):
+        if obsolete not in active_ids:
+            del runtime[obsolete]
+    if not catalogue:
+        st.session_state["analysis_tiles"] = []
+        st.session_state["analysis_cache_key"] = ""
+        return []
+
+    latest = catalogue[-1]
+    analysis_key = latest["id"] + ":" + ",".join(map(str, region))
+    if st.session_state.get("analysis_cache_key") != analysis_key:
+        try:
+            analysis, warnings = analysis_overlay_tiles(latest, region)
+            st.session_state["analysis_tiles"] = analysis
             st.session_state["warnings"] = warnings
-        st.session_state["pending_restore"] = False
-    except Exception as exc:
-        st.session_state["pending_restore"] = False
-        st.warning(f"Не удалось восстановить спутниковый слой: {exc}")
+        except Exception as exc:
+            st.session_state["analysis_tiles"] = []
+            st.session_state["warnings"] = [f"Анализ снега не загружен: {exc}"]
+        st.session_state["analysis_cache_key"] = analysis_key
+    return [runtime[spec["id"]] for spec in catalogue if spec["id"] in runtime] + (
+        st.session_state["analysis_tiles"]
+    )
+
 
 st.title("Анализ снежной обстановки")
 st.caption(
@@ -317,28 +376,23 @@ with st.sidebar:
                 scene_items = [s for s in available if s["date"] == chosen]
                 scene_choices = ["Все сцены этой даты"] + [s["label"] for s in scene_items]
                 choice = st.selectbox("Сцена", scene_choices)
-                if st.button("Показать снимок", disabled=not connected, type="primary", use_container_width=True):
-                    image_id = None if choice == scene_choices[0] else scene_items[scene_choices.index(choice)-1]["image_id"]
-                    if choice != scene_choices[0] and not image_id:
-                        st.error("Нет ID сцены. Выберите все сцены этой даты.")
+                if st.button("Добавить снимок как слой", disabled=not connected,
+                             type="primary", use_container_width=True):
+                    index = scene_choices.index(choice)
+                    image_id = None if index == 0 else scene_items[index - 1]["image_id"]
+                    if index != 0 and not image_id:
+                        st.error("У выбранной сцены отсутствует ID GEE.")
                     else:
-                        with st.spinner("Создаю картографические слои..."):
+                        with st.spinner("Добавляю независимый слой снимка..."):
                             try:
-                                day = date.fromisoformat(chosen)
-                                raw = scene_image(satellite, bbox, day, image_id, mask_clouds=False)
-                                masked = scene_image(satellite, bbox, day, image_id, mask_clouds=True)
-                                tiles, warnings = build_tile_layers(raw, bbox, day, masked)
-                                st.session_state["tiles"] = tiles
-                                st.session_state["image_caption"] = (
-                                    f"{satellite} · {chosen} · {choice}"
+                                spec = new_scene_layer(
+                                    satellite, date.fromisoformat(chosen), image_id,
+                                    "" if index == 0 else scene_items[index - 1]["time"],
                                 )
-                                st.session_state["warnings"] = warnings
-                                st.session_state["selection"] = {
-                                    "kind": "scene", "satellite": satellite,
-                                    "day": chosen, "image_id": image_id,
-                                }
+                                add_image_layer(spec, bbox)
+                                st.caption(f"Добавлен слой: {spec['name']}")
                             except Exception as exc:
-                                st.error(f"Ошибка при создании снимка: {exc}")
+                                st.error(f"Ошибка добавления слоя: {exc}")
             else:
                 st.caption("Для выбранного месяца снимков не найдено.")
         else:
@@ -369,28 +423,17 @@ with st.sidebar:
             except Exception as exc:
                 st.warning(f"Не удалось определить количество сцен: {exc}")
         if st.button(
-            "Показать медиану",
-            disabled=(not connected or count == 0),
+            "Добавить медиану как слой",
+            disabled=(not connected or count is None or count == 0),
             type="primary", use_container_width=True
         ):
-            with st.spinner("Создаю медианную мозаику..."):
+            with st.spinner("Добавляю медианную мозаику отдельным слоем..."):
                 try:
-                    raw, masked, actual_count = median_images(
-                        satellite, bbox, median_start, median_length, count=count
-                    )
-                    tiles, warnings = build_tile_layers(raw, bbox, median_start, masked)
-                    st.session_state["tiles"] = tiles
-                    st.session_state["image_caption"] = (
-                        f"Медиана {satellite} · {median_start}–{median_end} · "
-                        f"{actual_count} сцен"
-                    )
-                    st.session_state["warnings"] = warnings
-                    st.session_state["selection"] = {
-                        "kind": "median", "satellite": satellite,
-                        "start": median_start.isoformat(), "length": median_length,
-                    }
+                    spec = new_median_layer(satellite, median_start, median_length)
+                    add_image_layer(spec, bbox)
+                    st.caption(f"Добавлен слой: {spec['name']} · {count} сцен")
                 except Exception as exc:
-                    st.error(f"Ошибка при расчёте медианы: {exc}")
+                    st.error(f"Ошибка добавления медианы: {exc}")
 
     st.divider()
     st.subheader("4. Заметки")
@@ -454,9 +497,30 @@ with st.sidebar:
         except (SessionStorageError, ValueError) as exc:
             st.error(f"Не удалось сохранить исследование: {exc}")
 
+    st.divider()
+    st.caption(f"Открыто спутниковых слоёв: {len(st.session_state['image_layers'])}. "
+               "Удаление, прозрачность и видимость — в «Слоях карты».")
+    if st.button("Обновить спутниковые тайлы", disabled=not connected,
+                 use_container_width=True):
+        st.session_state["runtime_tiles"] = {}
+        st.session_state["analysis_cache_key"] = ""
+        st.session_state["analysis_tiles"] = []
+        st.rerun()
+    try:
+        st.download_button(
+            "Скачать исследование (ZIP)",
+            data=build_project_zip(research_payload(routes, points)),
+            file_name=safe_export_filename(st.session_state.get("research_name", "")),
+            mime="application/zip",
+            use_container_width=True,
+            help="Сохраняются все треки, точки, заметки, снимки и настройки. "
+                 "Растровые файлы не включаются.",
+        )
+    except (SessionStorageError, ValueError, TypeError) as exc:
+        st.warning(f"Экспорт проекта недоступен: {exc}")
     st.caption(
-        "Прозрачность снимка, подписи точек, маску облаков и подложку "
-        "можно менять прямо в «Слоях карты»."
+        "Снимки накладываются друг на друга, новейший выше. "
+        "Граница снега и изотермы относятся к последнему добавленному снимку."
     )
 
 if connection_error:
@@ -464,8 +528,13 @@ if connection_error:
         st.write(connection_error)
         st.caption("Секреты не нужно добавлять в GitHub.")
 
-caption = st.session_state.get("image_caption", "Трек без спутникового снимка")
-tiles = st.session_state.get("tiles", [])
+caption = (
+    f"Слоёв спутниковых снимков: {len(st.session_state['image_layers'])}."
+    + (f" Снег и изотермы: {st.session_state['image_layers'][-1]['name']}."
+       if st.session_state["image_layers"] else
+       " Добавьте снимок или медиану в панели слева.")
+)
+tiles = current_tile_layers(bbox, connected)
 google_terrain = None
 maps_key = setting("GOOGLE_MAPS_API_KEY", "")
 if maps_key:
@@ -490,16 +559,33 @@ render_id = hashlib.sha256(
     ).encode()
 ).hexdigest()[:24]
 map_event = research_map(config=config, render_id=render_id)
-if isinstance(map_event, dict) and isinstance(map_event.get("map_state"), dict):
-    st.session_state["map_state"] = map_event["map_state"]
+if isinstance(map_event, dict):
+    if isinstance(map_event.get("map_state"), dict):
+        st.session_state["map_state"] = map_event["map_state"]
+    if map_event.get("action") == "delete_layer":
+        ident = map_event.get("layer_id", "")
+        if ident and ident != st.session_state.get("last_deleted_image_id"):
+            old_count = len(st.session_state["image_layers"])
+            st.session_state["image_layers"] = [
+                item for item in st.session_state["image_layers"]
+                if item["id"] != ident
+            ]
+            if len(st.session_state["image_layers"]) != old_count:
+                st.session_state["last_deleted_image_id"] = ident
+                st.session_state["runtime_tiles"].pop(ident, None)
+                st.session_state["analysis_cache_key"] = ""
+                st.session_state["analysis_tiles"] = []
+                st.session_state.get("map_state", {}).get("overlays", {}).pop(ident, None)
+                st.rerun()
 
 for warning in st.session_state.get("warnings", []):
     st.warning(warning)
 if tiles:
     st.caption(
-        "Снимок без облачной маски включён по умолчанию. "
-        "Граница снега по NDSI может включать ледники. "
-        "Изотермы ERA5-Land являются модельной оценкой."
+        "Каждый снимок отображается без облачной маски. "
+        "Граница снега по NDSI может включать ледники и вычисляется "
+        "с маской облаков по последнему добавленному снимку. "
+        "Изотермы ERA5-Land — модельная оценка."
     )
 
 # Autosave if the state has actually changed. No credentials or tile URLs

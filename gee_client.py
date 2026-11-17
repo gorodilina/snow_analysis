@@ -148,6 +148,72 @@ def median_images(satellite: str, bbox: list[float], first: date,
     return raw, masked, count
 
 
+def image_from_layer(spec: dict, bbox: list[float], mask_clouds: bool = False) -> ee.Image:
+    """Regenerate an image from persisted metadata. Never store short-lived GEE URLs."""
+    kind = spec.get("kind")
+    if kind == "scene":
+        return scene_image(
+            spec["satellite"], bbox, date.fromisoformat(spec["day"]),
+            spec.get("image_id"), mask_clouds=mask_clouds,
+        )
+    if kind == "median":
+        first = date.fromisoformat(spec["start"])
+        length = int(spec["length"])
+        if not 2 <= length <= 9:
+            raise ValueError("Медианный интервал должен быть 2–9 дней.")
+        collection = _source_images(spec["satellite"], bbox, first, first + timedelta(days=length))
+        return collection.map(
+            lambda im: _prepare(im, spec["satellite"], mask_clouds)
+        ).median()
+    raise ValueError("Неизвестный тип слоя снимка.")
+
+
+def image_rgb_tile(spec: dict, bbox: list[float]) -> dict:
+    """Lightweight RGB map ID: no cloud-mask rendering and no isotherm computation."""
+    raw = image_from_layer(spec, bbox, False)
+    area = _roi(bbox)
+    return {
+        "id": spec["id"],
+        "name": spec["name"],
+        "role": "image",
+        "url": _tile_url(raw.clip(area), {
+            "bands": ["red", "green", "blue"],
+            "min": 0.025, "max": 0.35, "gamma": 1.15,
+        }),
+        "opacity": 0.55,
+        "visible": True,
+    }
+
+
+def analysis_overlay_tiles(spec: dict, bbox: list[float]) -> tuple[list[dict], list[str]]:
+    """Snow outline of the newest image, plus ERA5-derived contours above all RGBs."""
+    day = date.fromisoformat(spec["day"] if spec["kind"] == "scene" else spec["start"])
+    masked = image_from_layer(spec, bbox, mask_clouds=True)
+    area = _roi(bbox)
+    ndsi = masked.normalizedDifference(["green", "swir"])
+    valid = masked.select("green").mask().And(masked.select("swir").mask())
+    snow = ndsi.gte(0.4).And(masked.select("green").gt(0.1)).toByte().updateMask(valid)
+    edge = (snow.focalMax(1).neq(snow.focalMin(1))
+            .updateMask(valid.focalMin(1)).selfMask().clip(area))
+    result = [{
+        "id": "snow-outline",
+        "name": "Граница снега (NDSI)",
+        "role": "snow",
+        "url": _tile_url(edge, {"palette": ["00ffff"]}),
+        "opacity": 0.95,
+        "visible": False,
+    }]
+    warnings = []
+    try:
+        for item in _temperature_layers(bbox, day):
+            item["role"] = "isotherm"
+            item["id"] = "iso-" + item["name"].split(" ")[1].replace("+", "plus")
+            result.append(item)
+    except Exception as exc:
+        warnings.append(f"Изотермы ERA5-Land недоступны: {exc}")
+    return result, warnings
+
+
 def _tile_url(image: ee.Image, vis: dict) -> str:
     return image.getMapId(vis)["tile_fetcher"].url_format
 

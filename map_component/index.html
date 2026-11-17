@@ -12,6 +12,10 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
 #layers-body{max-height:55vh;overflow:auto;padding:3px 12px 12px}
 #layer-control.collapsed #layers-body{display:none}
 .layer-row{border-top:1px solid #edf0f2;padding:8px 0 6px}
+.layer-row-head{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.layer-delete{width:24px;height:24px;line-height:18px;border-radius:6px;border:1px solid #ddd;background:#fff;color:#9b2332;cursor:pointer;font-size:17px;flex-shrink:0}
+.layer-delete:hover{background:#fff0f2;border-color:#cc6677}
+.layer-section{margin-top:10px;margin-bottom:3px;font-weight:700}
 .layer-check{display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:550}
 .layer-check input{accent-color:#2667b7;width:16px;height:16px;flex-shrink:0}
 .opacity-row{padding:5px 0 0 23px;display:flex;gap:8px;align-items:center;color:#5d6873;font-size:11px}
@@ -29,8 +33,11 @@ html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-syst
   <button id="layers-head" type="button"><span>☷ Слои карты</span><span id="arrow">▾</span></button>
   <div id="layers-body">
     <b>Подложка</b><div id="basemaps"></div>
-    <b>Данные</b><div id="overlays"></div>
-    <div style="margin-top:10px;color:#6b7280;font-size:11px">Прозрачность, подписи и маска облаков настраиваются здесь. Режимы снимка с маской и без неё взаимоисключающие.</div>
+    <div class="layer-section">Снимки (новые поверх старых)</div>
+    <div id="image-overlays"></div>
+    <div class="layer-section">Граница снега, изотермы и трек</div>
+    <div id="overlays"></div>
+    <div style="margin-top:10px;color:#6b7280;font-size:11px">Каждый снимок можно скрыть, изменить его прозрачность или удалить. Граница снега рассчитана по последнему добавленному снимку.</div>
   </div>
 </div>
 <div id="top-note"></div>
@@ -62,6 +69,7 @@ if (activeMap) {
 // Reinitialize the controls as well as the Leaflet map.
 document.getElementById('basemaps').replaceChildren();
 document.getElementById('overlays').replaceChildren();
+document.getElementById('image-overlays').replaceChildren();
 const restored = config.mapState || {};
 let canReportChanges = false;
 function collectState() {
@@ -69,7 +77,7 @@ function collectState() {
   const namedBase=Object.keys(bases).find(name=>bases[name]===currentBase) || 'Рельеф (Esri)';
   const layerState={};
   for (const o of overlays) {
-    layerState[o.name]={
+    layerState[o.id]={
       visible:map.hasLayer(o.layer),
       opacity:Number(o.layer.options.opacity || 0)
     };
@@ -94,6 +102,15 @@ function reportChange() {
 
 const map = L.map('map', {zoomControl:true, preferCanvas:true});
 activeMap = map;
+// Explicit panes guarantee that RGB layers NEVER obscure snow, tracks,
+// waypoints, point labels, or ERA5 isolines, regardless of insertion order.
+for (const [pane,z] of [
+  ['imageryPane',310], ['snowPane',510], ['isoPane',540],
+  ['routePane',600], ['pointPane',650], ['labelPane',675]
+]) {
+  map.createPane(pane);
+  map.getPane(pane).style.zIndex=String(z);
+}
 const bases = {
   'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
   'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
@@ -138,39 +155,47 @@ const routeGroup = L.featureGroup();
 for (const item of config.routes){
   if (!item.coordinates || item.coordinates.length < 2) continue;
   let latlngs = item.coordinates.map(p=>[p[1],p[0]]);
-  L.polyline(latlngs, {color:'#ff148e',weight:4,opacity:.95}).bindPopup(esc(item.name)).addTo(routeGroup);
+  L.polyline(latlngs, {pane:'routePane',color:'#ff148e',weight:4,opacity:.95}).bindPopup(esc(item.name)).addTo(routeGroup);
 }
 if (restored.track !== false) routeGroup.addTo(map);
 const pointGroup = L.featureGroup();
 const labelGroup = L.featureGroup();
 for (const point of config.points){
   const [lon,lat] = point.coordinates;
-  L.circleMarker([lat,lon], {radius:5,color:'#1c2530',weight:1.2,fillColor:'#ffe447',fillOpacity:1})
+  L.circleMarker([lat,lon], {pane:'pointPane',radius:5,color:'#1c2530',weight:1.2,fillColor:'#ffe447',fillOpacity:1})
     .bindPopup('<b>'+esc(point.name)+'</b><div>'+lat.toFixed(5)+', '+lon.toFixed(5)+'</div>').addTo(pointGroup);
   const tag = L.divIcon({className:'', html:'<span class="label-icon">'+esc(point.name)+'</span>',iconSize:null,iconAnchor:[-10,4]});
-  L.marker([lat,lon], {icon:tag,interactive:false}).addTo(labelGroup);
+  L.marker([lat,lon], {pane:'labelPane',icon:tag,interactive:false}).addTo(labelGroup);
 }
 if (restored.points !== false) pointGroup.addTo(map);
 if (restored.labels === true) labelGroup.addTo(map);
 // Labels: users control their visibility in the map's Layers menu.
 const overlays = [];
-for (const entry of config.tiles){
+for (const entry of config.tiles) {
   if (!entry.url) continue;
-  const saved=(restored.overlays||{})[entry.name]||{};
-  const opacity=(typeof saved.opacity==='number')?saved.opacity:entry.opacity;
-  const visible=(typeof saved.visible==='boolean')?saved.visible:entry.visible;
-  const layer=L.tileLayer(entry.url, {opacity:opacity, maxZoom:20,attribution:'© Google Earth Engine / Copernicus / USGS',crossOrigin:true});
+  const role=entry.role||'analysis';
+  const id=entry.id||entry.name;
+  const saved=(restored.overlays||{})[id] || (restored.overlays||{})[entry.name] || {};
+  const opacity=(typeof saved.opacity==='number') ? saved.opacity : entry.opacity;
+  const visible=(typeof saved.visible==='boolean') ? saved.visible : entry.visible;
+  const pane=role==='image' ? 'imageryPane' : (role==='snow' ? 'snowPane' : 'isoPane');
+  const layer=L.tileLayer(entry.url, {
+    pane:pane, opacity:opacity, maxZoom:20,
+    attribution:'© Google Earth Engine / Copernicus / USGS',crossOrigin:true
+  });
   if (visible) layer.addTo(map);
   let errors=0;
   layer.on('tileerror',()=>{
     errors++;
     if (errors===4) {
-      const note=document.getElementById('top-note');
-      note.textContent=(config.caption||'Спутниковый слой')+
-        ' · не удалось загрузить тайлы слоя «'+entry.name+'». Попробуйте обновить снимок.';
+      document.getElementById('top-note').textContent=
+        'Не удалось загрузить тайлы «'+entry.name+'». Возможно, истёк срок URL GEE.';
     }
   });
-  overlays.push({name:entry.name, layer:layer,visible:visible, opacity:opacity, role:entry.role||null, checkbox:null});
+  overlays.push({
+    id:id,name:entry.name,layer:layer,visible:visible,opacity:opacity,
+    role:role,checkbox:null
+  });
 }
 const basemapDiv=document.querySelector('#basemaps');
 for (const [name, layer] of Object.entries(bases)) {
@@ -221,48 +246,75 @@ if (googleConfig.viewportUrl) {
   });
 }
 const overlayDiv=document.querySelector('#overlays');
-function addCheck(name, layer, initial, opacity, role){
-  const wrapper=document.createElement('div');wrapper.className='layer-row';
-  const label=document.createElement('label');label.className='layer-check';
-  const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=initial;
-  label.append(checkbox,document.createTextNode(name));wrapper.append(label);
+const imageryDiv=document.querySelector('#image-overlays');
+function addCheck(name, layer, initial, opacity, option={}) {
+  const wrapper=document.createElement('div');
+  wrapper.className='layer-row';
+  const head=document.createElement('div');
+  head.className='layer-row-head';
+  const label=document.createElement('label');
+  label.className='layer-check';
+  const checkbox=document.createElement('input');
+  checkbox.type='checkbox';
+  checkbox.checked=initial;
+  label.append(checkbox,document.createTextNode(name));
+  head.append(label);
+  wrapper.append(head);
   checkbox.onchange=()=>{
-    if (role==='raw'||role==='masked') {
-      if (checkbox.checked) {
-        // Exclusive image modes: masked transparency must reveal the basemap,
-        // not the unmasked RGB layer beneath it.
-        for (const other of overlays) {
-          if (other.role && other.role!==role) {
-            map.removeLayer(other.layer);
-            if (other.checkbox) other.checkbox.checked=false;
-          }
-        }
-        map.addLayer(layer);
-      } else {
-        map.removeLayer(layer);
-      }
-    } else {
-      checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
-    }
+    checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
     reportChange();
   };
+  if (option.removable && option.id) {
+    const del=document.createElement('button');
+    del.type='button';
+    del.className='layer-delete';
+    del.textContent='×';
+    del.title='Удалить снимок из исследования';
+    del.setAttribute('aria-label','Удалить слой '+name);
+    del.onclick=()=>{
+      const index=overlays.findIndex(o=>o.id===option.id);
+      if(index<0) return;
+      const removed=overlays.splice(index,1)[0];
+      map.removeLayer(removed.layer);
+      wrapper.remove();
+      clearTimeout(activeSnapshotTimer);
+      setComponentValue({
+        action:'delete_layer',layer_id:removed.id,
+        map_state:collectState(),event_id:Date.now()
+      });
+    };
+    head.append(del);
+  }
   if (opacity!==null && opacity!==undefined && layer.setOpacity){
-    const line=document.createElement('div');line.className='opacity-row';
-    const caption=document.createElement('span');caption.textContent='Прозрачность';
-    const slider=document.createElement('input');slider.type='range';slider.min=0;slider.max=100;slider.step=5;slider.value=Math.round(opacity*100);
-    const percent=document.createElement('span');percent.textContent=slider.value+'%';
-    slider.oninput=()=>{const val=Number(slider.value)/100;layer.setOpacity(val);percent.textContent=slider.value+'%';reportChange();};
+    const line=document.createElement('div');
+    line.className='opacity-row';
+    const caption=document.createElement('span');
+    caption.textContent='Непрозрачность';
+    const slider=document.createElement('input');
+    slider.type='range';
+    slider.min=0;slider.max=100;slider.step=5;
+    slider.value=Math.round(opacity*100);
+    const percent=document.createElement('span');
+    percent.textContent=slider.value+'%';
+    slider.oninput=()=>{
+      const val=Number(slider.value)/100;
+      layer.setOpacity(val);
+      percent.textContent=slider.value+'%';
+      reportChange();
+    };
     line.append(caption,slider,percent);wrapper.append(line);
   }
-  overlayDiv.append(wrapper);
+  (option.role==='image'?imageryDiv:overlayDiv).append(wrapper);
   return checkbox;
 }
 for (const item of overlays) {
-  item.checkbox=addCheck(item.name,item.layer,item.visible,item.opacity,item.role);
+  item.checkbox=addCheck(item.name,item.layer,item.visible,item.opacity,{
+    id:item.id,removable:item.role==='image',role:item.role
+  });
 }
-addCheck('Трек',routeGroup,restored.track !== false,null,null);
-addCheck('Точки / препятствия',pointGroup,restored.points !== false,null,null);
-addCheck('Подписи точек',labelGroup,restored.labels === true,null,null);
+addCheck('Трек',routeGroup,restored.track !== false,null);
+addCheck('Точки / препятствия',pointGroup,restored.points !== false,null);
+addCheck('Подписи точек',labelGroup,restored.labels === true,null);
 const bounds=config.bounds;
 if (restored.center && Array.isArray(restored.center) && restored.center.length===2 && Number.isFinite(Number(restored.zoom))) {
   map.setView(restored.center, restored.zoom);

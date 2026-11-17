@@ -10,14 +10,19 @@ from pathlib import Path
 import streamlit as st
 
 from gee_client import (
-    EarthEngineUnavailable, LANDSAT, SENTINEL, build_tile_layers,
-    initialize_ee, list_month_scenes, median_images, scene_image,
-    count_interval_scenes,
+    LANDSAT, SENTINEL, initialize_ee, list_month_scenes,
+    count_interval_scenes, image_rgb_tile, analysis_overlay_tiles,
 )
 from geo_utils import GeoInputError, read_geo, search_geometry
 from google_terrain import get_google_terrain
 from map_builder import map_config
 from map_component import research_map
+from project_layers import (
+    migrate_legacy_selection, new_median_layer, new_scene_layer, normalize_layers,
+)
+from project_archive import (
+    build_project_zip, import_project_zip, safe_export_filename,
+)
 from session_store import SessionStorageError, SessionStore, valid_token
 
 ROOT = Path(__file__).resolve().parent
@@ -80,11 +85,17 @@ def apply_research_payload(payload: dict):
     st.session_state["notes"] = payload.get("notes") or []
     st.session_state["manual_points"] = []
     st.session_state["map_state"] = payload.get("map_state") or {}
-    st.session_state["selection"] = payload.get("selection")
-    st.session_state["tiles"] = []
+    # Migrate sessions created before multiple independent imagery layers.
+    existing_layers = payload.get("layers")
+    st.session_state["image_layers"] = normalize_layers(
+        existing_layers if isinstance(existing_layers, list)
+        else migrate_legacy_selection(payload.get("selection"))
+    )
+    st.session_state["runtime_tiles"] = {}
+    st.session_state["analysis_tiles"] = []
+    st.session_state["analysis_cache_key"] = ""
     st.session_state["image_caption"] = ""
     st.session_state["warnings"] = []
-    st.session_state["pending_restore"] = bool(payload.get("selection"))
     ui = payload.get("ui") or {}
     for key in ["satellite", "mode", "year", "month", "median_length"]:
         if key in ui:
@@ -107,7 +118,7 @@ def research_payload(routes: list[dict], points: list[dict]) -> dict:
         "points": points,
         "notes": st.session_state.get("notes", []),
         "ui": ui,
-        "selection": st.session_state.get("selection"),
+        "layers": normalize_layers(st.session_state.get("image_layers", [])),
         "map_state": st.session_state.get("map_state", {}),
     }
 
@@ -153,12 +164,34 @@ st.session_state.setdefault("research_name", "Новое исследовани�
 st.session_state.setdefault("manual_points", [])
 st.session_state.setdefault("notes", [])
 st.session_state.setdefault("map_state", {})
-st.session_state.setdefault("selection", None)
+st.session_state.setdefault("image_layers", [])
+st.session_state.setdefault("runtime_tiles", {})
+st.session_state.setdefault("analysis_tiles", [])
+st.session_state.setdefault("analysis_cache_key", "")
+st.session_state.setdefault("warnings", [])
 
 with st.sidebar:
     st.title("🏔️ Анализ снежной обстановки")
     st.caption("Спутниковые снимки, граница снега и изотермы вдоль трека")
     st.subheader("1. Трек и точки")
+    # Import must run before widget keys are instantiated, so the restored
+    # satellite/date controls can be populated without Streamlit errors.
+    with st.expander("Восстановить проект из ZIP"):
+        archive_input = st.file_uploader(
+            "Архив исследования", type=["zip"], key="project_zip"
+        )
+        if st.button("Загрузить проект из ZIP", disabled=archive_input is None,
+                     use_container_width=True):
+            try:
+                apply_research_payload(import_project_zip(archive_input.getvalue()))
+                st.session_state.pop("active_token", None)
+                st.session_state.pop("last_saved_digest", None)
+                st.session_state["loaded_map_revision"] = "imported"
+                st.session_state["geo_files"] = []
+                st.query_params.clear()
+                st.rerun()
+            except (SessionStorageError, ValueError, KeyError, TypeError) as exc:
+                st.error(f"Ошибка импорта проекта: {exc}")
     uploads = st.file_uploader(
         "Загрузить файлы KML или GPX",
         type=["kml", "gpx", "csv"],
@@ -226,10 +259,10 @@ if st.session_state.get("last_geo_hash") != geo_hash:
     st.session_state["last_geo_hash"] = geo_hash
     st.session_state.pop("scenes", None)
     st.session_state.pop("scene_query", None)
-    if not st.session_state.get("pending_restore"):
-        st.session_state["tiles"] = []
-        st.session_state["image_caption"] = ""
-        st.session_state["selection"] = None
+    # Keep the layer catalogue; refresh its temporary tiles for a new ROI.
+    st.session_state["runtime_tiles"] = {}
+    st.session_state["analysis_tiles"] = []
+    st.session_state["analysis_cache_key"] = ""
 
 bbox = search_geometry(routes, points if not routes else [], buffer_m=4500)["bbox"]
 

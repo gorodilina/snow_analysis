@@ -17,7 +17,6 @@ from gee_client import (
     count_interval_scenes, image_rgb_tile, analysis_overlay_tiles,
 )
 from geo_utils import GeoInputError, read_geo, search_geometry
-from google_terrain import get_google_terrain
 from map_builder import map_config
 from map_component import research_map
 from project_layers import (
@@ -31,6 +30,7 @@ from gallery import (
     validate_bounds,
 )
 from gallery_mosaic import gallery_mosaic, gallery_paste, thumbnail_data
+from gallery_clipboard import record_paste_once
 from gallery_uploads import submit_gallery_upload
 from gallery_editor import edit_gallery_image
 from geo_export import export_geotiff, suggested_scale, geotiff_filename
@@ -47,6 +47,16 @@ st.set_page_config(page_title="Анализ снежной обстановки"
 st.markdown("""<style>
 .block-container{padding-top:1.3rem;padding-bottom:1rem;max-width:none}
 [data-testid="stSidebar"]{min-width:335px}
+.median-heading{display:flex;align-items:center;justify-content:space-between;margin:0 0 .5rem;font-size:1rem}
+.median-help-icon{display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;
+ border:1px solid #7b8794;border-radius:50%;color:#64748b;font:600 13px/1 sans-serif;
+ position:relative;cursor:help;outline-offset:3px}
+.median-help-content{display:none;position:absolute;right:0;top:26px;width:295px;max-width:calc(100vw - 45px);
+ padding:12px 14px;border:1px solid #d2d9e2;border-radius:9px;background:#fff;color:#273442;
+ text-align:left;font:13px/1.5 sans-serif;font-weight:400;box-shadow:0 5px 18px rgba(28,37,50,.18);
+ white-space:normal;z-index:9999}
+.median-help-icon:hover .median-help-content,.median-help-icon:focus .median-help-content,
+.median-help-icon:focus-within .median-help-content{display:block}
 </style>""", unsafe_allow_html=True)
 
 
@@ -74,11 +84,6 @@ def cached_scenes(satellite: str, bbox: tuple[float, ...], year: int, month: int
 @st.cache_data(ttl=900, show_spinner=False)
 def cached_interval_count(satellite: str, bbox: tuple[float, ...], start: date, days: int):
     return count_interval_scenes(satellite, list(bbox), start, days)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_google_terrain(api_key: str, bbox: tuple[float, ...]):
-    return get_google_terrain(api_key, list(bbox))
 
 
 def parse_upload(filename: str, data: bytes):
@@ -231,6 +236,7 @@ st.session_state.setdefault("pending_photo", None)
 st.session_state.setdefault("gallery_active_id", None)
 st.session_state.setdefault("gallery_page", 1)
 st.session_state.setdefault("gallery_uploader_revision", 0)
+st.session_state.setdefault("processed_paste_events", [])
 st.session_state.setdefault("geotiff_bytes", None)
 st.session_state.setdefault("map_state", {})
 st.session_state.setdefault("image_layers", [])
@@ -498,10 +504,10 @@ def accept_gallery_paste(event: dict | None) -> bool:
     """Handle a single clipboard upload from the gallery iframe."""
     if not isinstance(event, dict) or event.get("action") != "paste_image":
         return False
-    eid = event.get("event_id")
-    if not eid or eid == st.session_state.get("processed_mosaic_event"):
+    # A component retains its last value after subsequent Streamlit reruns.
+    # Gallery actions must not re-enable an earlier clipboard paste.
+    if not record_paste_once(event, st.session_state["processed_paste_events"]):
         return False
-    st.session_state["processed_mosaic_event"] = eid
     try:
         data_url = event.get("image_data", "")
         fmt = "jpg" if data_url.startswith("data:image/jpeg;") else "png"
@@ -590,8 +596,6 @@ def render_gallery_tab() -> None:
             st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
             st.session_state["gallery_active_id"] = mosaic_event["image_id"]
             gallery_edit_dialog(mosaic_event["image_id"])
-        elif action == "paste_image":
-            accept_gallery_paste(mosaic_event)
         elif action == "reorder":
             new_ids = mosaic_event.get("ids") or []
             if (
@@ -621,7 +625,7 @@ def show_app_capabilities() -> None:
         """
 **Маршрут и точки.** Загрузите KML/GPX-треки, CSV с точками или добавьте точки вручную. Управляйте отображением треков и подписей на карте.
 
-**Спутниковые снимки.** Просматривайте отдельные сцены Sentinel-2 и Landsat 8/9 или создавайте медиану за выбранный период. Видимость и прозрачность слоёв настраиваются. Выбирайте параметры так, чтобы из-под снимка проглядывала карта-подложка. Удобнее всего использовать слои OpenTopoMap или Google Terrain.
+**Спутниковые снимки.** Просматривайте отдельные сцены Sentinel-2 и Landsat 8/9 или создавайте медиану за выбранный период. Видимость и прозрачность слоёв настраиваются. Выбирайте параметры так, чтобы из-под снимка проглядывала карта-подложка. Удобнее всего использовать OpenTopoMap или «Рельеф (Esri)».
 
 **Снег и температура.** Для снимков доступны граница снега по NDSI и изотермы −5, 0, +5, +10 °C на основе ERA5-Land.
 
@@ -671,14 +675,6 @@ with st.sidebar:
     st.subheader("2. Спутниковые снимки")
     mode = st.radio("Режим", ["Конкретный снимок", "Медиана"], key="mode")
     if mode == "Медиана":
-        with st.popover("❓ Что такое медиана?"):
-            st.markdown(
-                "Медиана — это изображение, в котором для каждого пикселя и канала "
-                "выбирается медианное значение по спутниковым сценам выбранного периода. "
-                "Так снижается влияние случайных изменений между снимками. "
-                "В этом приложении RGB-медиана вычисляется без маски облаков, "
-                "поэтому облака могут остаться. Это не снимок на конкретную дату."
-            )
         satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
     else:
         satellite = None  # Both satellites are searched simultaneously.
@@ -890,9 +886,20 @@ with st.sidebar:
         else:
             st.caption("Выберите год и месяц, затем нажмите «Найти доступные даты».")
     else:
-        st.markdown("**3. Медиана**")
+        st.markdown(
+            """<div class="median-heading"><strong>3. Медиана</strong>
+<span class="median-help-icon" tabindex="0" aria-describedby="median-help-text">?
+<span id="median-help-text" class="median-help-content" role="tooltip">
+Медиана — изображение, в котором для каждого пикселя и канала берётся медианное
+значение по спутниковым сценам выбранного периода. Это уменьшает влияние
+случайных изменений. В этом приложении RGB-медиана вычисляется без маски
+облаков, поэтому облака могут оставаться. Медиана не является снимком на
+конкретную дату.
+</span></span></div>""", unsafe_allow_html=True,
+        )
         median_start = st.date_input(
-            "Первый день интервала", value=date(2025, 6, 1), key="median_start"
+            "Первый день интервала", value=date(2025, 6, 1),
+            key="median_start", format="DD.MM.YYYY"
         )
         median_length = st.slider(
             "Длительность, календарных дней", 2, 9, 5, 1, key="median_length"
@@ -1128,18 +1135,8 @@ if tab_map.open:
            " Добавьте снимок или медиану в панели слева.")
     )
     tiles = current_tile_layers(bbox, connected)
-    google_terrain = None
-    maps_key = setting("GOOGLE_MAPS_API_KEY", "")
-    if maps_key:
-        try:
-            google_terrain = cached_google_terrain(
-                str(maps_key), tuple(round(float(v), 6) for v in bbox)
-            )
-        except Exception:
-            st.caption("Google Terrain недоступен; другие подложки работают.")
-    
     config = map_config(
-        routes, points, tiles, caption, google_terrain,
+        routes, points, tiles, caption,
         st.session_state.get("map_state", {}),
     )
     # The component stays mounted on ordinary reruns; it is recreated only for a

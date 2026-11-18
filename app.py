@@ -187,6 +187,12 @@ if setting("SUPABASE_URL", "") and setting("SUPABASE_SECRET_KEY", ""):
     except SessionStorageError as exc:
         st.warning(f"Хранилище исследований: {exc}")
 
+if st.session_state.pop("reset_after_delete", False):
+    # Rehydrate only at the top of a new run, before widgets are instantiated.
+    apply_research_payload({})
+    st.session_state["loaded_map_revision"] = "deleted-session"
+    st.session_state.pop("delete_project_phrase", None)
+
 requested_token = st.query_params.get("session", "")
 if requested_token and requested_token != st.session_state.get("active_token"):
     if not valid_token(requested_token):
@@ -933,6 +939,50 @@ with st.sidebar:
             ):
                 queue_gallery_uploads(current_token)
                 st.rerun()
+        with st.expander("Удалить проект полностью"):
+            st.warning(
+                "Это необратимое действие. Будут удалены данные исследования "
+                "из Supabase и все его фотографии в приватном Storage. "
+                "Ссылка перестанет работать. Любой, у кого есть ссылка, "
+                "может удалить проект, поскольку авторизации пока нет."
+            )
+            if st.session_state["gallery_upload_jobs"]:
+                st.info(
+                    "Перед удалением дождитесь завершения загрузки фотографий."
+                )
+            phrase = st.text_input(
+                "Для подтверждения напишите УДАЛИТЬ",
+                key="delete_project_phrase",
+                placeholder="УДАЛИТЬ",
+            )
+            if st.button(
+                "Удалить проект безвозвратно",
+                key="confirm_delete_project",
+                use_container_width=True,
+                disabled=(
+                    phrase.strip() != "УДАЛИТЬ"
+                    or bool(st.session_state["gallery_upload_jobs"])
+                    or gallery_store is None
+                ),
+            ):
+                try:
+                    with st.spinner("Удаляю фотографии и исследование из Supabase..."):
+                        removed_photos = delete_project(
+                            store, gallery_store, current_token
+                        )
+                    st.session_state.pop("active_token", None)
+                    st.session_state.pop("last_saved_digest", None)
+                    st.session_state["reset_after_delete"] = True
+                    st.query_params.clear()
+                    st.toast(
+                        f"Проект удалён из БД. Файлов Storage удалено: {removed_photos}."
+                    )
+                    st.rerun()
+                except SessionStorageError as exc:
+                    st.error(
+                        "Не удалось полностью удалить проект: " + str(exc)
+                        + " Запись исследования сохранена, повторите удаление."
+                    )
         try:
             st.link_button(
                 "Создать другое исследование",

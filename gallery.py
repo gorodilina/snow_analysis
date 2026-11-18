@@ -259,7 +259,7 @@ def photo_layer_date(item: dict) -> str:
 def sorted_gallery(items: list[dict]) -> list[dict]:
     """Default gallery chronology: newest source acquisition first."""
     return sorted(items, key=lambda item: (
-        photo_layer_date(item), str(item.get("captured_at") or ""), item["id"]
+        photo_layer_date(item), str(item.get("captured_at") or "")
     ), reverse=True)
 
 
@@ -271,7 +271,7 @@ def new_gallery_item(bounds: list, fmt: str = "png") -> dict:
         "format": fmt,
         "bounds": validate_bounds(bounds),
         "storage_key": None,
-        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         "source_date": "",
         "source_layer_id": "",
         "annotations": [],

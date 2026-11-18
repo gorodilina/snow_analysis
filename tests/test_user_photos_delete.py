@@ -112,7 +112,7 @@ def test_geotiff_names_human_readable_and_distinct_areas():
     }
     a = geotiff_filename(scene, [46, 42, 46.2, 42.2], 20)
     b = geotiff_filename(scene, [47, 42, 47.2, 42.2], 20)
-    assert a == "S2_2025-06-15_08-32_20m_42.10N_46.10E.tif"
+    assert a == "S2_15.06.2025_08-32_20m_42.10N_46.10E.tif"
     assert a != b
     assert "img_not" not in a
     median = {
@@ -120,7 +120,7 @@ def test_geotiff_names_human_readable_and_distinct_areas():
         "start": "2025-06-01", "length": 5,
     }
     assert geotiff_filename(median, [46, 42, 46.2, 42.2], 30).startswith(
-        "L8-9_median_2025-06-01_to_2025-06-05_30m_"
+        "L8-9_median_01.06.2025_to_05.06.2025_30m_"
     )
 
 

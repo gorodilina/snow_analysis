@@ -141,7 +141,7 @@ def test_interface_formal_address_and_median_help():
     assert "median-help-icon" in app and "role=\"tooltip\"" in app
     assert "В этом приложении RGB-медиана вычисляется без маски облаков" in app
     assert "https://t.me/GorodVera" in app
-    assert "OpenTopoMap или «Рельеф (Esri)»" in app
+    assert "Удобнее всего использовать OpenTopoMap." in app
 
 
 def test_clipboard_paste_is_not_replayed_after_gallery_mutations():
@@ -189,3 +189,17 @@ def test_paste_event_tracking_does_not_share_mosaic_event_id():
     assert 'record_paste_once(event, st.session_state["processed_paste_events"])' in app
     assert 'st.session_state["processed_mosaic_event"] = eid' not in app
     assert 'accept_gallery_paste(mosaic_event)' not in app
+
+
+def test_median_help_is_opposite_radio_option_not_below_it():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "app.py").read_text(encoding="utf-8")
+    sidebar = app[app.index("with st.sidebar:"):]
+    radio = sidebar.index('mode = st.radio("Режим", ["Конкретный снимок", "Медиана"]')
+    tooltip = sidebar.index('class="median-help-icon"')
+    section = sidebar.index('st.markdown("**3. Медиана**")')
+    assert radio < tooltip < section
+    assert 'vertical_alignment="bottom"' in sidebar
+    assert "with median_help_column:" in sidebar
+    assert sidebar.count('class="median-help-icon"') == 1
+    assert "median-heading" not in app

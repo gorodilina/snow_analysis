@@ -296,6 +296,26 @@ def queue_gallery_uploads(token: str) -> None:
             errors[ident] = "Не удалось запустить загрузку: " + str(exc)
 
 
+def add_personal_image(raw: bytes, filename: str = "Изображение") -> dict:
+    """Add an uploaded or pasted photo (without claiming satellite georeferencing)."""
+    if len(st.session_state["gallery"]) >= 250:
+        raise SessionStorageError("В галерее достигнут предел 250 изображений.")
+    data, fmt = read_user_image(raw, filename)
+    item = new_gallery_item(None, fmt)
+    label = Path(filename or "Изображение").stem.strip()
+    item["title"] = (label or "Загруженное изображение")[:150]
+    st.session_state["gallery_blobs"][item["id"]] = data
+    st.session_state["gallery"].append(item)
+    if not st.session_state.get("gallery_custom_order", False):
+        st.session_state["gallery"] = sorted_gallery(st.session_state["gallery"])
+    st.session_state["gallery_active_id"] = item["id"]
+    st.session_state["gallery_export_bytes"] = None
+    token = st.session_state.get("active_token")
+    if token:
+        queue_gallery_uploads(token)
+    return item
+
+
 def render_pending_photo_form() -> None:
     """Stage the screenshot first; let the user rename/comment BEFORE upload."""
     pending = st.session_state.get("pending_photo")

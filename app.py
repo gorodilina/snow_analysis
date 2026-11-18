@@ -480,8 +480,11 @@ with st.sidebar:
 
     st.divider()
     st.subheader("2. Спутниковые снимки")
-    satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
     mode = st.radio("Режим", ["Конкретный снимок", "Медианная мозаика"], key="mode")
+    if mode == "Медианная мозаика":
+        satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
+    else:
+        satellite = None  # Both satellites are searched simultaneously.
 
 demo_routes, _ = read_geo(
     "default_route.kml", (ROOT / "data" / "default_route.kml").read_bytes()
@@ -621,25 +624,57 @@ with st.sidebar:
         month = month_col.selectbox(
             "Месяц", list(MONTHS), format_func=lambda m: MONTHS[m], key="month"
         )
-        query = (satellite, tuple(round(v, 6) for v in bbox), year, month)
+        query = (tuple(round(v, 6) for v in bbox), year, month)
         if st.button("Найти доступные даты", disabled=not connected, use_container_width=True):
-            with st.spinner("Получаю перечень сцен из Earth Engine..."):
-                try:
-                    st.session_state["scenes"] = cached_scenes(*query)
+            with st.spinner("Ищу съёмки Sentinel-2 и Landsat 8/9..."):
+                all_scenes, errors = [], []
+                for source in [SENTINEL, LANDSAT]:
+                    try:
+                        all_scenes.extend(
+                            {**scene, "satellite": source}
+                            for scene in cached_scenes(source, *query)
+                        )
+                    except Exception as exc:
+                        errors.append(f"{source}: {exc}")
+                if errors:
+                    st.warning("Не удалось получить часть данных: " + "; ".join(errors))
+                if all_scenes or not errors:
+                    st.session_state["scenes"] = all_scenes
                     st.session_state["scene_query"] = query
-                except Exception as exc:
-                    st.error(f"Не удалось найти снимки: {exc}")
+                else:
+                    st.session_state.pop("scene_query", None)
+                    st.error("Не удалось получить даты ни от одного спутника.")
         if st.session_state.get("scene_query") == query:
             available = st.session_state.get("scenes") or []
-            days_available = sorted({s["date"] for s in available}, reverse=True)
-            st.caption(f"Найдено сцен: {len(available)}; дней съёмки: {len(days_available)}")
+            days_available = sorted(
+                {(scene["date"], scene["satellite"]) for scene in available},
+                reverse=True,
+            )
+            st.caption(
+                f"Всего сцен: {len(available)}; "
+                f"дат Sentinel-2: {len({x['date'] for x in available if x['satellite'] == SENTINEL})}; "
+                f"дат Landsat: {len({x['date'] for x in available if x['satellite'] == LANDSAT})}."
+            )
             if days_available:
-                chosen = st.selectbox("Дата съёмки", days_available)
-                scene_items = [s for s in available if s["date"] == chosen]
-                scene_choices = ["Все сцены этой даты"] + [s["label"] for s in scene_items]
-                choice = st.selectbox("Сцена", scene_choices)
-                if st.button("Добавить снимок как слой", disabled=not connected,
-                             type="primary", use_container_width=True):
+                chosen_date, chosen_satellite = st.selectbox(
+                    "Дата съёмки и спутник",
+                    days_available,
+                    format_func=lambda pair: (
+                        f"{date.fromisoformat(pair[0]):%d.%m.%Y} · "
+                        f"{'S2' if pair[1] == SENTINEL else 'L8/9'}"
+                    ),
+                    key="selected_scene_date_and_satellite",
+                )
+                scene_items = [
+                    item for item in available
+                    if item["date"] == chosen_date and item["satellite"] == chosen_satellite
+                ]
+                scene_choices = ["Все сцены этой даты"] + [item["label"] for item in scene_items]
+                choice = st.selectbox("Сцена", scene_choices, key="selected_scene")
+                if st.button(
+                    "Добавить снимок как слой", disabled=not connected,
+                    type="primary", use_container_width=True,
+                ):
                     index = scene_choices.index(choice)
                     image_id = None if index == 0 else scene_items[index - 1]["image_id"]
                     if index != 0 and not image_id:
@@ -648,7 +683,8 @@ with st.sidebar:
                         with st.spinner("Добавляю независимый слой снимка..."):
                             try:
                                 spec = new_scene_layer(
-                                    satellite, date.fromisoformat(chosen), image_id,
+                                    chosen_satellite, date.fromisoformat(chosen_date),
+                                    image_id,
                                     "" if index == 0 else scene_items[index - 1]["time"],
                                 )
                                 add_image_layer(spec, bbox)

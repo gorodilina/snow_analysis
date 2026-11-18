@@ -102,8 +102,8 @@ def test_capture_dom_ignores_blue_rectangle_and_uses_hires():
     assert "renderer:selectionRenderer" in html
     assert "onclone:clone" in html
     assert "querySelectorAll('.capture-selection-overlay')" in html
-    assert "scale:2.8" in html
-    assert "10000000/(sw*sh)" in html
+    assert "Math.min(2.8,Math.sqrt(9500000/(cropWidth*cropHeight)))" in html
+    assert "width:cropWidth,height:cropHeight" in html
 
 
 def test_canvas_editor_exposes_save_undo_clear():

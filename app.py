@@ -522,7 +522,7 @@ def render_gallery_tab() -> None:
     st.subheader("Галерея")
     st.caption(
         f"Сохранено изображений: {len(items)}. "
-        "Выбери фотографию, чтобы отредактировать название и заметку."
+        "Выберите фотографию, чтобы отредактировать название и заметку."
     )
     if st.session_state.get("gallery_upload_jobs"):
         st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
@@ -621,9 +621,9 @@ def show_app_capabilities() -> None:
         """
 **Маршрут и точки.** Загрузите KML/GPX-треки, CSV с точками или добавьте точки вручную. Управляйте отображением треков и подписей на карте.
 
-**Спутниковые снимки.** Просматривайте отдельные сцены Sentinel-2 и Landsat 8/9 или создавайте медиану за выбранный период.
+**Спутниковые снимки.** Просматривайте отдельные сцены Sentinel-2 и Landsat 8/9 или создавайте медиану за выбранный период. Видимость и прозрачность слоёв настраиваются. Выбирайте параметры так, чтобы из-под снимка проглядывала карта-подложка. Удобнее всего использовать слои OpenTopoMap или Google Terrain.
 
-**Снег и температура.** Для снимков доступны граница снега по NDSI и изотермы −5, 0, +5, +10 °C на основе ERA5-Land. Видимость и прозрачность слоёв настраиваются на карте.
+**Снег и температура.** Для снимков доступны граница снега по NDSI и изотермы −5, 0, +5, +10 °C на основе ERA5-Land.
 
 **Галерея.** Сохраняйте фрагменты карты, добавляйте PNG/JPG с устройства или через Ctrl+V, меняйте порядок изображений, подписи и рисуйте поверх снимков.
 
@@ -640,6 +640,7 @@ with st.sidebar:
     st.title("🏔️ Анализ снежной обстановки")
     if st.button("ⓘ Возможности приложения", use_container_width=True):
         show_app_capabilities()
+    st.caption("Исправления и пожелания: [@GorodVera](https://t.me/GorodVera)")
     st.subheader("1. Трек и точки")
     uploads = st.file_uploader(
         "Загрузить файлы KML или GPX",
@@ -670,6 +671,14 @@ with st.sidebar:
     st.subheader("2. Спутниковые снимки")
     mode = st.radio("Режим", ["Конкретный снимок", "Медиана"], key="mode")
     if mode == "Медиана":
+        with st.popover("❓ Что такое медиана?"):
+            st.markdown(
+                "Медиана — это изображение, в котором для каждого пикселя и канала "
+                "выбирается медианное значение по спутниковым сценам выбранного периода. "
+                "Так снижается влияние случайных изменений между снимками. "
+                "В этом приложении RGB-медиана вычисляется без маски облаков, "
+                "поэтому облака могут остаться. Это не снимок на конкретную дату."
+            )
         satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
     else:
         satellite = None  # Both satellites are searched simultaneously.
@@ -1180,7 +1189,7 @@ if tab_map.open:
             st.session_state["processed_map_event"] = event_id
             try:
                 if st.session_state.get("pending_photo"):
-                    st.warning("Сначала сохрани или отмени предыдущий снимок.")
+                    st.warning("Сначала сохраните или отмените предыдущий снимок.")
                 else:
                     bounds = validate_bounds(map_event.get("bounds"))
                     fmt = map_event.get("image_format", "png")
@@ -1216,7 +1225,7 @@ if tab_map.open:
                     # The component event already caused this Streamlit run.
                     # The pending-photo form is rendered below, in the same run.
                     # A second st.rerun() here used to make the first click seem lost.
-                    st.toast("Снимок готов — добавь название или заметку и сохрани.")
+                    st.toast("Снимок готов — добавьте название или заметку и сохраните.")
             except (SessionStorageError, ValueError, TypeError) as exc:
                 st.error(f"Не удалось подготовить снимок для галереи: {exc}")
         elif changed_analysis:

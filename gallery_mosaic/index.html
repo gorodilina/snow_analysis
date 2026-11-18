@@ -42,7 +42,7 @@ function emit(action,payload){
     value:{action:action,...payload,event_id:eventId()},dataType:'json'
   },'*');
 }
-let resizePending=false;
+let resizePending=false,lastFrameHeight=0;
 function layout(){
   if(resizePending)return;
   resizePending=true;
@@ -57,10 +57,18 @@ function layout(){
       const height=available*ratio+(caption?caption.offsetHeight:0)+2;
       tile.style.gridRowEnd='span '+Math.max(7,Math.ceil((height+gap)/(row+gap)));
     }
-    window.parent.postMessage({
-      isStreamlitMessage:true,type:'streamlit:setFrameHeight',
-      height:Math.ceil(document.documentElement.scrollHeight)+12
-    },'*');
+    // Do not use document.scrollHeight here: it includes the iframe viewport
+    // height, so adding padding repeatedly makes the empty paste iframe grow.
+    const endElement=pasteOnlyMode?pasteZone:mosaic;
+    const desiredHeight=Math.max(1,Math.ceil(endElement.getBoundingClientRect().bottom
+      +(pasteOnlyMode?5:12)));
+    if(Math.abs(desiredHeight-lastFrameHeight)>=1){
+      lastFrameHeight=desiredHeight;
+      window.parent.postMessage({
+        isStreamlitMessage:true,type:'streamlit:setFrameHeight',
+        height:desiredHeight
+      },'*');
+    }
   });
 }
 const pasteZone=document.getElementById('paste-zone');
@@ -173,7 +181,11 @@ window.addEventListener('message',event=>{
   lastRevision=revision;
   render(Array.isArray(args.photos)?args.photos:[]);
 });
-if('ResizeObserver' in window)new ResizeObserver(layout).observe(mosaic);
+if('ResizeObserver' in window){
+  const observer=new ResizeObserver(layout);
+  observer.observe(mosaic);
+  observer.observe(pasteZone);
+}
 window.addEventListener('resize',layout);
 window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');
 </script></body></html>

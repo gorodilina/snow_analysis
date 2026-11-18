@@ -117,3 +117,28 @@ def test_help_dialog_and_median_label_are_present():
     assert 'if st.button("ⓘ Возможности приложения"' in app
     assert '["Конкретный снимок", "Медиана"]' in app
     assert 'st.session_state["mode"] = "Медиана"' in app
+
+
+def test_gallery_paste_zone_height_does_not_track_iframe_viewport():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "gallery_mosaic/index.html").read_text(encoding="utf-8")
+    assert "endElement=pasteOnlyMode?pasteZone:mosaic" in html
+    assert "endElement.getBoundingClientRect().bottom" in html
+    assert "document.documentElement.scrollHeight" not in html.replace(
+        "document.scrollHeight", ""
+    )
+    assert "observer.observe(pasteZone)" in html
+
+
+def test_interface_formal_address_and_median_help():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "app.py").read_text(encoding="utf-8")
+    assert "Выберите фотографию, чтобы отредактировать" in app
+    assert "Сначала сохраните или отмените" in app
+    assert "добавьте название или заметку и сохраните" in app
+    assert "Выбери фотографию" not in app
+    assert "Сначала сохрани" not in app
+    assert "❓ Что такое медиана?" in app
+    assert "В этом приложении RGB-медиана вычисляется без маски облаков" in app
+    assert "https://t.me/GorodVera" in app
+    assert "OpenTopoMap или Google Terrain" in app

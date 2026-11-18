@@ -6,6 +6,9 @@
 *{box-sizing:border-box}
 html,body{padding:0;margin:0;background:transparent;font:13px system-ui,-apple-system,sans-serif;color:#25303b}
 .hint{display:flex;gap:8px;align-items:center;color:#748292;font-size:12px;margin:2px 3px 12px}
+#paste-zone{border:1px dashed #8ba9cf;border-radius:9px;background:#f3f7fc;padding:11px 14px;margin-bottom:13px;color:#315174;cursor:pointer;line-height:1.6;outline:0}
+#paste-zone:focus{border-color:#1768cd;box-shadow:0 0 0 2px #b8d8ff}
+#paste-status{font-size:12px;color:#60728c}
 .hint svg{width:15px;height:15px}
 #mosaic{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));grid-auto-rows:8px;gap:12px;align-items:start}
 .tile{grid-row-end:span 20;cursor:grab;border:1px solid #d4dce4;border-radius:12px;background:#e9eef3;position:relative;box-shadow:0 3px 12px rgba(20,31,45,.08);overflow:hidden;min-width:0;user-select:none;outline:0;transition:box-shadow .15s,border-color .15s,opacity .15s}
@@ -23,6 +26,10 @@ html,body{padding:0;margin:0;background:transparent;font:13px system-ui,-apple-s
 @media(max-width:500px){#mosaic{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tile .meta{padding:7px}}
 </style></head><body>
 <div class="hint"><span>⠿</span><span>Перетащите снимки, чтобы изменить порядок. Нажмите на карточку для редактирования.</span></div>
+<div id="paste-zone" tabindex="0" role="button" aria-label="Вставить картинку">
+  <b>Вставить изображение из буфера</b> — нажмите сюда, затем Ctrl+V (⌘V на Mac)
+  <div id="paste-status">Поддерживаются PNG и JPG до 8 МБ.</div>
+</div>
 <div id="mosaic" aria-label="Галерея снимков"></div><div id="message"></div>
 <script>
 'use strict';
@@ -56,6 +63,35 @@ function layout(){
     },'*');
   });
 }
+const pasteZone=document.getElementById('paste-zone');
+const pasteStatus=document.getElementById('paste-status');
+pasteZone.addEventListener('click',()=>pasteZone.focus());
+pasteZone.addEventListener('keydown',e=>{
+  if(e.key==='Enter'||e.key===' '){e.preventDefault();pasteZone.focus();}
+});
+document.addEventListener('paste',e=>{
+  const images=Array.from(e.clipboardData?.items||[])
+    .filter(item=>item.kind==='file'&&item.type.startsWith('image/'));
+  if(!images.length)return;
+  e.preventDefault();
+  const file=images[0].getAsFile();
+  if(!file){pasteStatus.textContent='Не удалось получить изображение из буфера.';return;}
+  if(!['image/jpeg','image/png'].includes(file.type)){
+    pasteStatus.textContent='Поддерживаются только PNG и JPG.';return;
+  }
+  if(file.size>8000000){pasteStatus.textContent='Файл больше 8 МБ. Сохраните JPG меньшего размера.';return;}
+  pasteStatus.textContent='Добавляю изображение в галерею…';
+  const reader=new FileReader();
+  reader.onload=()=>{
+    emit('paste_image',{
+      image_data:reader.result,
+      filename:file.name||'Изображение из буфера.png'
+    });
+    pasteStatus.textContent='Изображение отправлено в галерею.';
+  };
+  reader.onerror=()=>{pasteStatus.textContent='Не удалось прочитать буфер обмена.';};
+  reader.readAsDataURL(file);
+});
 function render(photos){
   mosaic.replaceChildren();
   for(const photo of photos){

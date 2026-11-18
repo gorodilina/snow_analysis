@@ -410,76 +410,14 @@ def render_gallery_export(items: list[dict]) -> None:
             )
 
 
-def render_gallery_tab() -> None:
-    """Independent, paged thumbnail gallery with explicit per-photo editor."""
+@st.dialog("Просмотр и редактирование изображения", width="large")
+def gallery_edit_dialog(image_id: str) -> None:
+    """A real modal opened by clicking any masonry card (not below the grid)."""
     items = st.session_state["gallery"]
-    st.subheader("Галерея")
-    st.caption(
-        f"Сохранено изображений: {len(items)}. "
-        "Выбери фотографию, чтобы отредактировать название и заметку."
-    )
-    if st.session_state.get("gallery_upload_jobs"):
-        st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
-    if st.session_state.get("gallery_upload_errors"):
-        st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
-    if not items:
-        st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
+    active = next((item for item in items if item["id"] == image_id), None)
+    if active is None:
+        st.warning("Изображение уже удалено.")
         return
-
-    # Export is always visible ABOVE the mosaic/editor, not buried below photos.
-    render_gallery_export(items)
-
-    ids = {item["id"] for item in items}
-    if st.session_state.get("gallery_active_id") not in ids:
-        st.session_state["gallery_active_id"] = items[-1]["id"]
-
-    cards = []
-    for item in items:
-        try:
-            source = gallery_image_bytes(item)
-            annotations = json.dumps(item.get("annotations", []), sort_keys=True)
-            thumbnail = thumbnail_data(source, item["format"], annotations)
-        except (SessionStorageError, OSError, ValueError) as exc:
-            st.warning(f"Миниатюра «{item.get('title', '')}» недоступна: {exc}")
-            thumbnail = ""
-        cards.append({
-            "id": item["id"],
-            "title": item.get("title", ""),
-            "source_date": photo_layer_date(item),
-            "thumbnail": thumbnail,
-        })
-    mosaic_event = gallery_mosaic(cards)
-    if isinstance(mosaic_event, dict) and (
-        mosaic_event.get("event_id") != st.session_state.get("processed_mosaic_event")
-    ):
-        action = mosaic_event.get("action")
-        if action == "select" and mosaic_event.get("image_id") in ids:
-            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
-            st.session_state["gallery_active_id"] = mosaic_event["image_id"]
-            st.rerun()
-        elif action == "reorder":
-            new_ids = mosaic_event.get("ids") or []
-            if (
-                isinstance(new_ids, list) and len(new_ids) == len(items)
-                and set(new_ids) == ids
-            ):
-                st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
-                by_id = {item["id"]: item for item in items}
-                st.session_state["gallery"] = [by_id[ident] for ident in new_ids]
-                st.session_state["gallery_custom_order"] = True
-                st.session_state["gallery_export_bytes"] = None
-                st.rerun()
-            else:
-                st.warning("Некорректный порядок галереи. Изменения не применены.")
-    if st.session_state.get("gallery_custom_order"):
-        if st.button("Вернуть порядок по дате снимков", use_container_width=False):
-            st.session_state["gallery_custom_order"] = False
-            st.session_state["gallery"] = sorted_gallery(items)
-            st.session_state["gallery_export_bytes"] = None
-            st.rerun()
-
-    active_id = st.session_state["gallery_active_id"]
-    active = next((item for item in items if item["id"] == active_id), items[-1])
     with st.container(border=True):
         st.markdown("#### Выбранное изображение")
         try:
@@ -542,6 +480,90 @@ def render_gallery_tab() -> None:
                 st.rerun()
             except SessionStorageError as exc:
                 st.error(f"Не удалось удалить изображение: {exc}")
+
+
+
+
+def render_gallery_tab() -> None:
+    """Independent, paged thumbnail gallery with explicit per-photo editor."""
+    items = st.session_state["gallery"]
+    st.subheader("Галерея")
+    st.caption(
+        f"Сохранено изображений: {len(items)}. "
+        "Выбери фотографию, чтобы отредактировать название и заметку."
+    )
+    if st.session_state.get("gallery_upload_jobs"):
+        st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
+    if st.session_state.get("gallery_upload_errors"):
+        st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
+    if not items:
+        st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
+        return
+
+    # Export is always visible ABOVE the mosaic/editor, not buried below photos.
+    render_gallery_export(items)
+
+    ids = {item["id"] for item in items}
+    if st.session_state.get("gallery_active_id") not in ids:
+        st.session_state["gallery_active_id"] = items[-1]["id"]
+
+    cards = []
+    for item in items:
+        try:
+            source = gallery_image_bytes(item)
+            annotations = json.dumps(item.get("annotations", []), sort_keys=True)
+            thumbnail = thumbnail_data(source, item["format"], annotations)
+        except (SessionStorageError, OSError, ValueError) as exc:
+            st.warning(f"Миниатюра «{item.get('title', '')}» недоступна: {exc}")
+            thumbnail = ""
+        cards.append({
+            "id": item["id"],
+            "title": item.get("title", ""),
+            "source_date": photo_layer_date(item),
+            "thumbnail": thumbnail,
+        })
+    mosaic_event = gallery_mosaic(cards)
+    if isinstance(mosaic_event, dict) and (
+        mosaic_event.get("event_id") != st.session_state.get("processed_mosaic_event")
+    ):
+        action = mosaic_event.get("action")
+        if action == "select" and mosaic_event.get("image_id") in ids:
+            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+            st.session_state["gallery_active_id"] = mosaic_event["image_id"]
+            gallery_edit_dialog(mosaic_event["image_id"])
+        elif action == "paste_image":
+            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+            try:
+                image_data = mosaic_event.get("image_data", "")
+                requested = "jpg" if image_data.startswith("data:image/jpeg;") else "png"
+                raw, _ = read_snapshot(image_data, requested)
+                item = add_personal_image(
+                    raw, mosaic_event.get("filename") or "Изображение из буфера.png"
+                )
+                st.toast(f"Добавлено в галерею: {item['title']}")
+                st.rerun()
+            except (SessionStorageError, ValueError, TypeError) as exc:
+                st.error(f"Не удалось вставить изображение: {exc}")
+        elif action == "reorder":
+            new_ids = mosaic_event.get("ids") or []
+            if (
+                isinstance(new_ids, list) and len(new_ids) == len(items)
+                and set(new_ids) == ids
+            ):
+                st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+                by_id = {item["id"]: item for item in items}
+                st.session_state["gallery"] = [by_id[ident] for ident in new_ids]
+                st.session_state["gallery_custom_order"] = True
+                st.session_state["gallery_export_bytes"] = None
+                st.rerun()
+            else:
+                st.warning("Некорректный порядок галереи. Изменения не применены.")
+    if st.session_state.get("gallery_custom_order"):
+        if st.button("Вернуть порядок по дате снимков", use_container_width=False):
+            st.session_state["gallery_custom_order"] = False
+            st.session_state["gallery"] = sorted_gallery(items)
+            st.session_state["gallery_export_bytes"] = None
+            st.rerun()
 
 
 

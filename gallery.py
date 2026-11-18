@@ -298,9 +298,9 @@ class GalleryStorage:
 
 
 def gallery_export_filename(title: str, fmt: str, used: set[str]) -> str:
-    """Unicode-safe names, no path traversal; deterministic collision suffixes."""
-    name = re.sub(r'[<>:"/\\|?*\\x00-\\x1f]+', "_", str(title or "Снимок"))
-    name = re.sub(r"\\s+", " ", name).strip(" ._")
+    """Unicode-safe names, no traversal; deterministic collision suffixes."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(title or "Снимок"))
+    name = re.sub(r"\s+", " ", name).strip(" ._")
     if name.upper().split(".")[0] in {
         "CON", "PRN", "AUX", "NUL", *{f"COM{i}" for i in range(1, 10)},
         *{f"LPT{i}" for i in range(1, 10)},

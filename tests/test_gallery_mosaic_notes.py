@@ -137,7 +137,7 @@ def test_interface_formal_address_and_median_help():
     assert "Сначала сохраните или отмените" in app
     assert "добавьте название или заметку и сохраните" in app
     assert "Выбери фотографию" not in app
-    assert "Сначала сохрани" not in app
+    assert "Сначала сохрани или отмени предыдущий снимок." not in app
     assert "❓ Что такое медиана?" in app
     assert "В этом приложении RGB-медиана вычисляется без маски облаков" in app
     assert "https://t.me/GorodVera" in app

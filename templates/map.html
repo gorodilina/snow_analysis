@@ -45,21 +45,6 @@ const bases = {
   'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,attribution:'© OpenStreetMap contributors'}),
   'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,attribution:'Imagery © Esri and providers'})
 };
-// The official Google Map Tiles API requires a paid Maps Platform project,
-// enabled Map Tiles API and a separately restricted GOOGLE_MAPS_API_KEY.
-// No unofficial Google tile URLs are used here.
-const googleConfig = config.googleTerrain || {};
-if (googleConfig.url) {
-  bases['Google Terrain'] = L.tileLayer(googleConfig.url, {
-    maxZoom:20,
-    attribution: '© Google Maps · ' + escGoogleAttribution(googleConfig.attribution || 'Map data © Google Maps')
-  });
-}
-function escGoogleAttribution(value) {
-  return String(value).replace(/[&<>"']/g, c => ({
-    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
-  }[c]));
-}
 let currentBase = bases['Рельеф (Esri)'];
 currentBase.addTo(map);
 let baseErrorCount = 0;
@@ -119,47 +104,6 @@ for (const [name, layer] of Object.entries(bases)) {
   const input=document.createElement('input');input.type='radio';input.name='base';input.value=name;input.checked=name==='Рельеф (Esri)';
   input.onchange=()=>{map.removeLayer(currentBase);currentBase=layer;currentBase.addTo(map);currentBase.bringToBack();};
   row.append(input, document.createTextNode(' '+name));basemapDiv.append(row);
-}
-if (!googleConfig.url) {
-  const note=document.createElement('div');
-  note.className='base-opt';
-  note.style.color='#808991';
-  note.textContent='Google Terrain (потребуется API-ключ)';
-  basemapDiv.append(note);
-}
-if (bases['Google Terrain']) {
-  bases['Google Terrain'].on('tileerror',()=>{
-    if(currentBase===bases['Google Terrain']) {
-      map.removeLayer(currentBase);
-      currentBase=bases['Рельеф (Esri)'];
-      currentBase.addTo(map);
-      const fallback=document.querySelector('input[name="base"][value="Рельеф (Esri)"]');
-      if(fallback) fallback.checked=true;
-      document.getElementById('top-note').textContent='Google Terrain: ошибка загрузки тайлов. Проверьте ключ и Maps Tile API.';
-    }
-  });
-}
-// Google Maps Map Tiles API requires viewport-specific data attribution.
-// Refresh it on each map move when supported by the provider.
-if (googleConfig.viewportUrl) {
-  let attributionTimer;
-  map.on('moveend', () => {
-    if (currentBase !== bases['Google Terrain']) return;
-    clearTimeout(attributionTimer);
-    attributionTimer=setTimeout(() => {
-      const b=map.getBounds();
-      const url=googleConfig.viewportUrl +
-        '&zoom='+map.getZoom() +
-        '&north='+b.getNorth()+'&south='+b.getSouth()+
-        '&east='+b.getEast()+'&west='+b.getWest();
-      fetch(url).then(x=>x.ok?x.json():Promise.reject(x.status))
-      .then(data=>{
-        const copyright=escGoogleAttribution(data.copyright || googleConfig.attribution || '');
-        bases['Google Terrain'].getAttribution=()=> '© Google Maps · '+copyright;
-        map.attributionControl._update();
-      }).catch(()=>{}); // Initial viewport copyright remains as fallback.
-    },350);
-  });
 }
 const overlayDiv=document.querySelector('#overlays');
 function addCheck(name, layer, initial, opacity, role){

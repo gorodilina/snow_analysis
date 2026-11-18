@@ -27,8 +27,9 @@ from project_archive import (
 from gallery import (
     GalleryStorage, build_gallery_zip, build_gallery_pdf, new_gallery_item,
     normalize_gallery, normalize_annotations, read_snapshot, render_annotations,
-    suggested_gallery_title, validate_bounds,
+    suggested_gallery_title, photo_layer_date, sorted_gallery, validate_bounds,
 )
+from gallery_mosaic import gallery_mosaic, thumbnail_data
 from gallery_editor import edit_gallery_image
 from geo_export import export_geotiff, suggested_scale
 from session_store import SessionStorageError, SessionStore, valid_token
@@ -90,8 +91,20 @@ def apply_research_payload(payload: dict):
     st.session_state["research_name"] = payload.get("name") or "Новое исследование"
     st.session_state["saved_routes"] = payload.get("routes") or []
     st.session_state["saved_points"] = payload.get("points") or []
-    st.session_state["notes"] = payload.get("notes") or []
-    st.session_state["gallery"] = normalize_gallery(payload.get("gallery") or [])
+    previous_notes = payload.get("notes") or []
+    if isinstance(previous_notes, list):
+        st.session_state["research_note"] = "\n\n".join(
+            str(note.get("text") or "") for note in previous_notes
+            if isinstance(note, dict) and note.get("text")
+        )
+    else:
+        st.session_state["research_note"] = str(previous_notes)
+    st.session_state["gallery_custom_order"] = bool(payload.get("gallery_custom_order", False))
+    loaded_gallery = normalize_gallery(payload.get("gallery") or [])
+    st.session_state["gallery"] = (
+        loaded_gallery if st.session_state["gallery_custom_order"]
+        else sorted_gallery(loaded_gallery)
+    )
     st.session_state["gallery_blobs"] = payload.get("_gallery_media") or {}
     st.session_state["gallery_export_bytes"] = None
     st.session_state["pending_photo"] = None
@@ -138,8 +151,12 @@ def research_payload(routes: list[dict], points: list[dict]) -> dict:
         "name": st.session_state.get("research_name", "Новое исследование"),
         "routes": routes,
         "points": points,
-        "notes": st.session_state.get("notes", []),
+        "notes": (
+            [{"id": "research", "text": st.session_state.get("research_note", ""), "created": ""}]
+            if st.session_state.get("research_note", "").strip() else []
+        ),
         "gallery": normalize_gallery(st.session_state.get("gallery", [])),
+        "gallery_custom_order": bool(st.session_state.get("gallery_custom_order", False)),
         "ui": ui,
         "layers": normalize_layers(st.session_state.get("image_layers", [])),
         "map_state": st.session_state.get("map_state", {}),
@@ -186,7 +203,8 @@ if requested_token and requested_token != st.session_state.get("active_token"):
 
 st.session_state.setdefault("research_name", "Новое исследование")
 st.session_state.setdefault("manual_points", [])
-st.session_state.setdefault("notes", [])
+st.session_state.setdefault("research_note", "")
+st.session_state.setdefault("gallery_custom_order", False)
 st.session_state.setdefault("gallery", [])
 st.session_state.setdefault("gallery_blobs", {})
 st.session_state.setdefault("gallery_export_bytes", None)
@@ -265,6 +283,8 @@ def render_pending_photo_form() -> None:
                     )
             st.session_state["gallery_blobs"][item["id"]] = pending["data"]
             st.session_state["gallery"].append(item)
+            if not st.session_state.get("gallery_custom_order", False):
+                st.session_state["gallery"] = sorted_gallery(st.session_state["gallery"])
             st.session_state["gallery_active_id"] = item["id"]
             st.session_state["pending_photo"] = None
             st.session_state["gallery_export_bytes"] = None
@@ -291,31 +311,50 @@ def render_gallery_tab() -> None:
     if st.session_state.get("gallery_active_id") not in ids:
         st.session_state["gallery_active_id"] = items[-1]["id"]
 
-    per_page = 9
-    page_count = (len(items) + per_page - 1) // per_page
-    if page_count > 1:
-        if not 1 <= st.session_state.get("gallery_page", 1) <= page_count:
-            st.session_state["gallery_page"] = page_count
-        page = st.number_input(
-            "Страница галереи", min_value=1, max_value=page_count,
-            step=1, key="gallery_page",
-        )
-    else:
-        page = 1
-    visible_items = items[(page - 1) * per_page : page * per_page]
-    for offset in range(0, len(visible_items), 3):
-        columns = st.columns(3)
-        for column, item in zip(columns, visible_items[offset:offset + 3]):
-            with column:
-                try:
-                    st.image(render_annotations(gallery_image_bytes(item), item), use_container_width=True)
-                except SessionStorageError as exc:
-                    st.warning(str(exc))
-                st.caption(item.get("title") or "Без названия")
-                if st.button("Открыть / редактировать", key="open_gallery_" + item["id"],
-                             use_container_width=True):
-                    st.session_state["gallery_active_id"] = item["id"]
-                    st.rerun()
+    cards = []
+    for item in items:
+        try:
+            source = gallery_image_bytes(item)
+            annotations = json.dumps(item.get("annotations", []), sort_keys=True)
+            thumbnail = thumbnail_data(source, item["format"], annotations)
+        except (SessionStorageError, OSError, ValueError) as exc:
+            st.warning(f"Миниатюра «{item.get('title', '')}» недоступна: {exc}")
+            thumbnail = ""
+        cards.append({
+            "id": item["id"],
+            "title": item.get("title", ""),
+            "source_date": photo_layer_date(item),
+            "thumbnail": thumbnail,
+        })
+    mosaic_event = gallery_mosaic(cards)
+    if isinstance(mosaic_event, dict) and (
+        mosaic_event.get("event_id") != st.session_state.get("processed_mosaic_event")
+    ):
+        action = mosaic_event.get("action")
+        if action == "select" and mosaic_event.get("image_id") in ids:
+            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+            st.session_state["gallery_active_id"] = mosaic_event["image_id"]
+            st.rerun()
+        elif action == "reorder":
+            new_ids = mosaic_event.get("ids") or []
+            if (
+                isinstance(new_ids, list) and len(new_ids) == len(items)
+                and set(new_ids) == ids
+            ):
+                st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+                by_id = {item["id"]: item for item in items}
+                st.session_state["gallery"] = [by_id[ident] for ident in new_ids]
+                st.session_state["gallery_custom_order"] = True
+                st.session_state["gallery_export_bytes"] = None
+                st.rerun()
+            else:
+                st.warning("Некорректный порядок галереи. Изменения не применены.")
+    if st.session_state.get("gallery_custom_order"):
+        if st.button("Вернуть порядок по дате снимков", use_container_width=False):
+            st.session_state["gallery_custom_order"] = False
+            st.session_state["gallery"] = sorted_gallery(items)
+            st.session_state["gallery_export_bytes"] = None
+            st.rerun()
 
     active_id = st.session_state["gallery_active_id"]
     active = next((item for item in items if item["id"] == active_id), items[-1])
@@ -396,7 +435,8 @@ def render_gallery_tab() -> None:
                 ext, mime = "zip", "application/zip"
             else:
                 output = build_gallery_pdf(
-                    items, pictures, st.session_state["research_name"]
+                    items, pictures, st.session_state["research_name"],
+                    project_notes=st.session_state.get("research_note", ""),
                 )
                 ext, mime = "pdf", "application/pdf"
             st.session_state["gallery_export_bytes"] = (ext, mime, output)
@@ -461,8 +501,11 @@ with st.sidebar:
 
     st.divider()
     st.subheader("2. Спутниковые снимки")
-    satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
     mode = st.radio("Режим", ["Конкретный снимок", "Медианная мозаика"], key="mode")
+    if mode == "Медианная мозаика":
+        satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
+    else:
+        satellite = None  # Both satellites are searched simultaneously.
 
 demo_routes, _ = read_geo(
     "default_route.kml", (ROOT / "data" / "default_route.kml").read_bytes()
@@ -602,25 +645,57 @@ with st.sidebar:
         month = month_col.selectbox(
             "Месяц", list(MONTHS), format_func=lambda m: MONTHS[m], key="month"
         )
-        query = (satellite, tuple(round(v, 6) for v in bbox), year, month)
+        query = (tuple(round(v, 6) for v in bbox), year, month)
         if st.button("Найти доступные даты", disabled=not connected, use_container_width=True):
-            with st.spinner("Получаю перечень сцен из Earth Engine..."):
-                try:
-                    st.session_state["scenes"] = cached_scenes(*query)
+            with st.spinner("Ищу съёмки Sentinel-2 и Landsat 8/9..."):
+                all_scenes, errors = [], []
+                for source in [SENTINEL, LANDSAT]:
+                    try:
+                        all_scenes.extend(
+                            {**scene, "satellite": source}
+                            for scene in cached_scenes(source, *query)
+                        )
+                    except Exception as exc:
+                        errors.append(f"{source}: {exc}")
+                if errors:
+                    st.warning("Не удалось получить часть данных: " + "; ".join(errors))
+                if all_scenes or not errors:
+                    st.session_state["scenes"] = all_scenes
                     st.session_state["scene_query"] = query
-                except Exception as exc:
-                    st.error(f"Не удалось найти снимки: {exc}")
+                else:
+                    st.session_state.pop("scene_query", None)
+                    st.error("Не удалось получить даты ни от одного спутника.")
         if st.session_state.get("scene_query") == query:
             available = st.session_state.get("scenes") or []
-            days_available = sorted({s["date"] for s in available}, reverse=True)
-            st.caption(f"Найдено сцен: {len(available)}; дней съёмки: {len(days_available)}")
+            days_available = sorted(
+                {(scene["date"], scene["satellite"]) for scene in available},
+                reverse=True,
+            )
+            st.caption(
+                f"Всего сцен: {len(available)}; "
+                f"дат Sentinel-2: {len({x['date'] for x in available if x['satellite'] == SENTINEL})}; "
+                f"дат Landsat: {len({x['date'] for x in available if x['satellite'] == LANDSAT})}."
+            )
             if days_available:
-                chosen = st.selectbox("Дата съёмки", days_available)
-                scene_items = [s for s in available if s["date"] == chosen]
-                scene_choices = ["Все сцены этой даты"] + [s["label"] for s in scene_items]
-                choice = st.selectbox("Сцена", scene_choices)
-                if st.button("Добавить снимок как слой", disabled=not connected,
-                             type="primary", use_container_width=True):
+                chosen_date, chosen_satellite = st.selectbox(
+                    "Дата съёмки и спутник",
+                    days_available,
+                    format_func=lambda pair: (
+                        f"{date.fromisoformat(pair[0]):%d.%m.%Y} · "
+                        f"{'S2' if pair[1] == SENTINEL else 'L8/9'}"
+                    ),
+                    key="selected_scene_date_and_satellite",
+                )
+                scene_items = [
+                    item for item in available
+                    if item["date"] == chosen_date and item["satellite"] == chosen_satellite
+                ]
+                scene_choices = ["Все сцены этой даты"] + [item["label"] for item in scene_items]
+                choice = st.selectbox("Сцена", scene_choices, key="selected_scene")
+                if st.button(
+                    "Добавить снимок как слой", disabled=not connected,
+                    type="primary", use_container_width=True,
+                ):
                     index = scene_choices.index(choice)
                     image_id = None if index == 0 else scene_items[index - 1]["image_id"]
                     if index != 0 and not image_id:
@@ -629,7 +704,8 @@ with st.sidebar:
                         with st.spinner("Добавляю независимый слой снимка..."):
                             try:
                                 spec = new_scene_layer(
-                                    satellite, date.fromisoformat(chosen), image_id,
+                                    chosen_satellite, date.fromisoformat(chosen_date),
+                                    image_id,
                                     "" if index == 0 else scene_items[index - 1]["time"],
                                 )
                                 add_image_layer(spec, bbox)
@@ -680,29 +756,15 @@ with st.sidebar:
 
     st.divider()
     st.subheader("4. Заметки")
-    with st.form("note_form", clear_on_submit=True):
-        new_note = st.text_area(
-            "Наблюдение о снеговой обстановке",
-            placeholder="Например, 15 июня на северном склоне сохраняется снег...",
-            max_chars=3000,
-            height=90,
-        )
-        if st.form_submit_button("Добавить заметку", use_container_width=True):
-            if new_note.strip():
-                import secrets
-                st.session_state["notes"].append({
-                    "id": secrets.token_hex(8),
-                    "text": new_note.strip(),
-                    "created": date.today().isoformat(),
-                })
-    for note in st.session_state["notes"]:
-        with st.expander(f"{note.get('created','')} · {note.get('text','')[:45]}"):
-            st.write(note.get("text", ""))
-            if st.button("Удалить заметку", key="delete_note_"+note["id"]):
-                st.session_state["notes"] = [
-                    n for n in st.session_state["notes"] if n["id"] != note["id"]
-                ]
-                st.rerun()
+    st.text_area(
+        "Заметки об исследовании",
+        key="research_note",
+        placeholder="Наблюдения о снеговой обстановке, выводы и комментарии...",
+        height=180,
+        max_chars=18000,
+        help="Единое поле. Изменения автоматически сохраняются вместе с исследованием.",
+    )
+    st.caption("Отдельная кнопка сохранения не нужна: текст входит в автосохранение исследования.")
 
     st.divider()
     st.subheader("5. Сохранение исследования по ссылке")
@@ -749,24 +811,6 @@ with st.sidebar:
             st.code(share_link(token), language=None)
         except (SessionStorageError, ValueError) as exc:
             st.error(f"Не удалось полностью сохранить исследование: {exc}")
-
-    with st.expander("Резервная копия всего исследования (ZIP)"):
-        st.caption("Отдельно от экспорта галереи: все треки, слои, заметки и фотографии.")
-        if st.button("Подготовить резервную копию", use_container_width=True):
-            try:
-                st.session_state["project_backup_bytes"] = build_project_zip(
-                    research_payload(routes, points), collect_gallery_images()
-                )
-            except (SessionStorageError, ValueError) as exc:
-                st.error(f"Не удалось создать резервный ZIP: {exc}")
-        if st.session_state.get("project_backup_bytes"):
-            st.download_button(
-                "Скачать резервную копию",
-                data=st.session_state["project_backup_bytes"],
-                file_name=safe_export_filename(st.session_state["research_name"]),
-                mime="application/zip",
-                use_container_width=True,
-            )
 
     st.divider()
     st.subheader("6. Геопривязанный GeoTIFF")
@@ -922,16 +966,31 @@ with tab_map:
                     fmt = map_event.get("image_format", "png")
                     blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
                     item = new_gallery_item(bounds, fmt)
-                    item["title"] = suggested_gallery_title(
-                        st.session_state["image_layers"],
+                    capture_state = (
                         incoming_state if isinstance(incoming_state, dict)
-                        else st.session_state["map_state"],
+                        else st.session_state["map_state"]
+                    )
+                    visible_layers = [
+                        layer for layer in st.session_state["image_layers"]
+                        if capture_state.get("overlays", {}).get(
+                            layer["id"], {}
+                        ).get("visible", True)
+                    ]
+                    if visible_layers:
+                        source = visible_layers[-1]
+                        item["source_layer_id"] = source["id"]
+                        item["source_date"] = source.get("day", source.get("start", ""))
+                    item["title"] = suggested_gallery_title(
+                        st.session_state["image_layers"], capture_state
                     )
                     # Keep the image in a draft until the title/note form is confirmed.
                     # Every new screenshot gets its own random gallery ID.
                     st.session_state["pending_photo"] = {"item": item, "data": blob}
                     st.session_state["map_state"]["selection_bounds"] = bounds
-                    st.rerun()
+                    # The component event already caused this Streamlit run.
+                    # The pending-photo form is rendered below, in the same run.
+                    # A second st.rerun() here used to make the first click seem lost.
+                    st.toast("Снимок готов — добавь название или заметку и сохрани.")
             except (SessionStorageError, ValueError, TypeError) as exc:
                 st.error(f"Не удалось подготовить снимок для галереи: {exc}")
         elif changed_analysis:

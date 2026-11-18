@@ -11,7 +11,7 @@ import json
 import re
 import secrets
 import zipfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -62,9 +62,11 @@ def read_snapshot(data_url: str, requested: str = "png") -> tuple[bytes, str]:
             image = original.convert("RGB" if requested == "jpg" else "RGBA")
             output = io.BytesIO()
             if requested == "jpg":
-                image.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
+                image.save(output, format="JPEG", quality=94, subsampling=0, optimize=False)
             else:
-                image.save(output, format="PNG", optimize=True)
+                # Browser has already encoded the screenshot. A second full
+                # optimize=True PNG pass can freeze Streamlit on large photos.
+                image.save(output, format="PNG", compress_level=2, optimize=False)
         data = output.getvalue()
         if len(data) > MAX_IMAGE_BYTES:
             raise SessionStorageError("Снимок превышает 8 МБ после обработки. Выберите JPG.")
@@ -208,6 +210,8 @@ def normalize_gallery(items: list) -> list[dict]:
             "bounds": validate_bounds(item.get("bounds")),
             "storage_key": key,
             "captured_at": str(item.get("captured_at") or "")[:40],
+            "source_date": str(item.get("source_date") or "")[:10],
+            "source_layer_id": str(item.get("source_layer_id") or "")[:80],
             "annotations": normalize_annotations(item.get("annotations", [])),
         })
     return out
@@ -233,6 +237,34 @@ def suggested_gallery_title(layers: list[dict], map_state: dict) -> str:
     return (newest_first[0] + f" + {len(newest_first)-1} слоя")[:150]
 
 
+def photo_layer_date(item: dict) -> str:
+    """Date of its source acquisition; fallback for pre-upgrade gallery items."""
+    direct = str(item.get("source_date") or "")
+    try:
+        if direct:
+            return date.fromisoformat(direct).isoformat()
+    except ValueError:
+        pass
+    # Old images only saved the source date as part of the display title.
+    match = re.search(r"(\d{1,2})\.(\d{2})\.(\d{2,4})", str(item.get("title", "")))
+    if match:
+        day, month, year = map(int, match.groups())
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            pass
+    return str(item.get("captured_at") or "")[:10]
+
+
+def sorted_gallery(items: list[dict]) -> list[dict]:
+    """Default gallery chronology: newest source acquisition first."""
+    return sorted(items, key=lambda item: (
+        photo_layer_date(item), str(item.get("captured_at") or "")
+    ), reverse=True)
+
+
 def new_gallery_item(bounds: list, fmt: str = "png") -> dict:
     return {
         "id": "gal_" + secrets.token_hex(10),
@@ -241,7 +273,9 @@ def new_gallery_item(bounds: list, fmt: str = "png") -> dict:
         "format": fmt,
         "bounds": validate_bounds(bounds),
         "storage_key": None,
-        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "source_date": "",
+        "source_layer_id": "",
         "annotations": [],
     }
 
@@ -346,8 +380,11 @@ def _report_font() -> str:
     return "GalleryCyrillic"
 
 
-def build_gallery_pdf(items: list[dict], images: dict[str, bytes], name: str = "Галерея") -> bytes:
-    """One annotated image per landscape A4 page, preserving Cyrillic captions."""
+def build_gallery_pdf(
+    items: list[dict], images: dict[str, bytes], name: str = "Галерея",
+    project_notes: str = "",
+) -> bytes:
+    """Write project notes FIRST, then one annotated picture per landscape A4 page."""
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_LEFT
     from reportlab.lib.pagesizes import A4, landscape
@@ -375,6 +412,14 @@ def build_gallery_pdf(items: list[dict], images: dict[str, bytes], name: str = "
         spaceBefore=8, spaceAfter=3,
     )
     story = []
+    if project_notes.strip():
+        story.append(Paragraph(escape(str(name)[:150]), title_style))
+        story.append(Paragraph("Заметки об исследовании", title_style))
+        for part in project_notes.strip().split("\n\n"):
+            story.append(Paragraph(
+                escape(part).replace("\n", "<br/>"), note_style
+            ))
+        story.append(PageBreak())
     for index, item in enumerate(items, 1):
         raw = images.get(item["id"])
         if raw is None:

@@ -481,18 +481,18 @@ map.on('mouseup',e=>{
     setSelectedBounds(null);return;
   }
   setSelectedBounds([west,south,east,north]);
-  setComponentValue({
-    action:'area_selected', bounds:chosenBounds,
-    map_state:collectState(), event_id:nextMapEventId()
-  });
+  // Do not force an immediate Streamlit rerun while the next click is about
+  // to capture a photo. The bounds are still returned in map_state.
+  reportChange();
 });
 saveAreaButton.onclick=async()=>{
   if(captureBusy || !chosenBounds) return;
   if(typeof window.html2canvas!=='function') {
     captureStatus.textContent='Сервис снимка карты недоступен';return;
   }
+  clearTimeout(activeSnapshotTimer); // pending move/selection event must not overwrite capture
   captureBusy=true;saveAreaButton.disabled=true;
-  captureStatus.textContent='Сохраняю изображение…';
+  captureStatus.textContent='Готовлю выделенный фрагмент карты…';
   try {
     const southWest=map.latLngToContainerPoint([chosenBounds[1],chosenBounds[0]]);
     const northEast=map.latLngToContainerPoint([chosenBounds[3],chosenBounds[2]]);
@@ -510,11 +510,18 @@ saveAreaButton.onclick=async()=>{
     // Wait for Leaflet's SVG renderer and html2canvas's DOM clone to observe
     // the removal. The highlight is excluded BOTH in live CSS and the clone.
     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-    let canvas;
+    const cropWidth=Math.ceil(right-left), cropHeight=Math.ceil(bottom-top);
+    // Rendering only the chosen rectangle avoids a costly 10MP render of
+    // the ENTIRE map before a second large canvas cropping operation.
+    const scale=Math.min(2.8,Math.sqrt(9500000/(cropWidth*cropHeight)));
+    const mapRect=map.getContainer().getBoundingClientRect();
+    let finalCanvas;
     try {
-      canvas=await window.html2canvas(map.getContainer(),{
+      finalCanvas=await window.html2canvas(map.getContainer(),{
+        x:mapRect.left+left, y:mapRect.top+top,
+        width:cropWidth,height:cropHeight,
         useCORS:true,allowTaint:false,backgroundColor:'#f4f4f4',
-        logging:false,scale:2.8,
+        logging:false,scale,
         ignoreElements:el=>Boolean(el.classList&&(
           el.classList.contains('leaflet-control-container')||
           el.classList.contains('capture-selection-overlay')
@@ -527,27 +534,28 @@ saveAreaButton.onclick=async()=>{
       document.body.classList.remove('capturing-map');
       if(originalRect)originalRect.addTo(map);
     }
-    const sx=canvas.width/map.getSize().x;
-    const sy=canvas.height/map.getSize().y;
-    const sw=Math.ceil((right-left)*sx),sh=Math.ceil((bottom-top)*sy);
-    const reduce=Math.min(1,Math.sqrt(10000000/(sw*sh)));
-    const finalCanvas=document.createElement('canvas');
-    finalCanvas.width=Math.max(1,Math.floor(sw*reduce));
-    finalCanvas.height=Math.max(1,Math.floor(sh*reduce));
-    finalCanvas.getContext('2d').drawImage(
-      canvas,left*sx,top*sy,sw,sh,0,0,finalCanvas.width,finalCanvas.height
-    );
+    captureStatus.textContent='Сжимаю изображение…';
     const fmt=document.getElementById('capture-format').value;
     const mime=fmt==='jpg'?'image/jpeg':'image/png';
-    const imageData=finalCanvas.toDataURL(mime,fmt==='jpg'?.96:undefined);
-    if(imageData.length>11000000)
-      throw Error('Скриншот более 8 МБ. Выберите JPG либо меньшую область.');
+    // Async toBlob avoids blocking the browser UI on a huge toDataURL call.
+    const imageBlob=await new Promise(resolve=>
+      finalCanvas.toBlob(resolve,mime,fmt==='jpg'?.95:undefined)
+    );
+    if(!imageBlob)throw Error('Не удалось сформировать изображение.');
+    if(imageBlob.size>8000000)
+      throw Error('Снимок более 8 МБ. Выберите JPG либо меньшую область.');
+    const imageData=await new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>resolve(reader.result);
+      reader.onerror=()=>reject(Error('Не удалось прочитать изображение.'));
+      reader.readAsDataURL(imageBlob);
+    });
     setComponentValue({
       action:'capture_image', image_data:imageData,
       image_format:fmt,bounds:chosenBounds,
       map_state:collectState(),event_id:nextMapEventId()
     });
-    captureStatus.textContent='Снимок отправлен в галерею';
+    captureStatus.textContent='Готово! Заполните название и заметку в форме над картой.';
   } catch(error) {
     captureStatus.textContent='Ошибка: '+String(error.message||error).slice(0,130);
   } finally {

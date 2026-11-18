@@ -161,7 +161,9 @@ def test_two_photo_captures_can_be_confirmed_and_preserved():
         at.run()
         assert not at.exception
         made.append(photo["id"])
-        assert [entry["id"] for entry in at.session_state["gallery"]] == made
+        # The gallery is now sorted newest first, not in click order.
+        assert set(entry["id"] for entry in at.session_state["gallery"]) == set(made)
+        assert len(at.session_state["gallery"]) == len(made)
         assert at.session_state["pending_photo"] is None
 
     assert len(at.session_state["gallery_blobs"]) == 2

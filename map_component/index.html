@@ -151,6 +151,11 @@ for (const [pane,offset] of [['routePane',0],['pointPane',1],['labelPane',2]]) {
   map.createPane(pane);
   map.getPane(pane).style.zIndex=String(routeZ+offset);
 }
+// The selection uses its OWN SVG renderer, even though the map uses
+// preferCanvas for tracks. It must never be baked into the route canvas.
+map.createPane('selectionPane');
+map.getPane('selectionPane').style.zIndex=String(routeZ+5);
+const selectionRenderer=L.svg({pane:'selectionPane'});
 const bases = {
   'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,crossOrigin:true,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
   'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,crossOrigin:true,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
@@ -427,7 +432,7 @@ function setSelectedBounds(bounds) {
   if(areaRect) map.removeLayer(areaRect);
   if(bounds) {
     areaRect=L.rectangle([[bounds[1],bounds[0]],[bounds[3],bounds[2]]],{
-      pane:'routePane',className:'capture-selection-overlay',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+      pane:'selectionPane',renderer:selectionRenderer,className:'capture-selection-overlay',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
     }).addTo(map);
     saveAreaButton.disabled=false;
     captureStatus.textContent='Область выбрана';
@@ -462,7 +467,7 @@ map.on('mousemove',e=>{
   const north=Math.max(originLatLng.lat,e.latlng.lat);
   if(areaRect)map.removeLayer(areaRect);
   areaRect=L.rectangle([[south,west],[north,east]],{
-    pane:'routePane',className:'capture-selection-overlay',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+    pane:'selectionPane',renderer:selectionRenderer,className:'capture-selection-overlay',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
   }).addTo(map);
 });
 map.on('mouseup',e=>{

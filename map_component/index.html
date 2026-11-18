@@ -492,6 +492,7 @@ saveAreaButton.onclick=async()=>{
   }
   clearTimeout(activeSnapshotTimer); // pending move/selection event must not overwrite capture
   captureBusy=true;saveAreaButton.disabled=true;
+  const startCaptureMs=performance.now();
   captureStatus.textContent='Готовлю выделенный фрагмент карты…';
   try {
     const southWest=map.latLngToContainerPoint([chosenBounds[1],chosenBounds[0]]);
@@ -550,12 +551,14 @@ saveAreaButton.onclick=async()=>{
       reader.onerror=()=>reject(Error('Не удалось прочитать изображение.'));
       reader.readAsDataURL(imageBlob);
     });
+    captureStatus.textContent='Отправляю снимок в приложение…';
     setComponentValue({
       action:'capture_image', image_data:imageData,
       image_format:fmt,bounds:chosenBounds,
+      capture_ms:Math.round(performance.now()-startCaptureMs),
       map_state:collectState(),event_id:nextMapEventId()
     });
-    captureStatus.textContent='Готово! Заполните название и заметку в форме над картой.';
+    captureStatus.textContent='Снимок отправлен, ожидаю форму над картой…';
   } catch(error) {
     captureStatus.textContent='Ошибка: '+String(error.message||error).slice(0,130);
   } finally {

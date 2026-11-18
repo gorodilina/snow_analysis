@@ -42,37 +42,35 @@ def validate_bounds(bounds: list) -> list[float]:
 
 
 def read_snapshot(data_url: str, requested: str = "png") -> tuple[bytes, str]:
-    """Decode and re-encode an untrusted browser screenshot with strict limits."""
+    """Validate browser-encoded screenshot without an expensive second encoding.
+
+    Pillow validates the file and dimension limits, while the exact original
+    bytes are retained for storage; no image quality is lost on the server.
+    """
     if not isinstance(data_url, str) or len(data_url) > (MAX_IMAGE_BYTES * 4 // 3 + 4096):
         raise SessionStorageError("Изображение слишком большое.")
     if requested not in FORMATS:
         raise SessionStorageError("Поддерживаются PNG и JPG.")
-    match = re.fullmatch(r"data:image/(?:png|jpeg);base64,([A-Za-z0-9+/=]+)", data_url)
+    match = re.fullmatch(r"data:image/(png|jpeg);base64,([A-Za-z0-9+/=]+)", data_url)
     if match is None:
         raise SessionStorageError("Некорректный формат снимка карты.")
+    mime_format = "jpg" if match.group(1) == "jpeg" else "png"
+    if mime_format != requested:
+        raise SessionStorageError("Тип изображения не совпадает с выбранным форматом.")
     try:
-        raw = base64.b64decode(match.group(1), validate=True)
+        raw = base64.b64decode(match.group(2), validate=True)
         if len(raw) > MAX_IMAGE_BYTES:
             raise SessionStorageError("Снимок превышает 8 МБ.")
-        with PILImage.open(io.BytesIO(raw)) as original:
-            if original.format not in ("PNG", "JPEG"):
-                raise SessionStorageError("Неизвестный формат изображения.")
-            if original.width * original.height > MAX_PIXELS:
+        with PILImage.open(io.BytesIO(raw)) as picture:
+            expected_format = "JPEG" if requested == "jpg" else "PNG"
+            if picture.format != expected_format:
+                raise SessionStorageError("Формат файла не соответствует выбранному.")
+            if picture.width * picture.height > MAX_PIXELS:
                 raise SessionStorageError("Снимок слишком высокого разрешения.")
-            image = original.convert("RGB" if requested == "jpg" else "RGBA")
-            output = io.BytesIO()
-            if requested == "jpg":
-                image.save(output, format="JPEG", quality=94, subsampling=0, optimize=False)
-            else:
-                # Browser has already encoded the screenshot. A second full
-                # optimize=True PNG pass can freeze Streamlit on large photos.
-                image.save(output, format="PNG", compress_level=2, optimize=False)
-        data = output.getvalue()
-        if len(data) > MAX_IMAGE_BYTES:
-            raise SessionStorageError("Снимок превышает 8 МБ после обработки. Выберите JPG.")
-        return data, requested
-    except (ValueError, OSError, UnidentifiedImageError) as exc:
-        raise SessionStorageError("Не удалось прочитать снимок карты.") from exc
+            picture.verify()
+        return raw, requested
+    except (ValueError, OSError, UnidentifiedImageError, SyntaxError) as exc:
+        raise SessionStorageError("Не удалось проверить снимок карты.") from exc
 
 
 def normalize_annotations(annotations: list | None) -> list[dict]:

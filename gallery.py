@@ -250,7 +250,7 @@ def suggested_gallery_title(layers: list[dict], map_state: dict) -> str:
         if states.get(layer.get("id"), {}).get("visible", True)
     ]
     if not visible:
-        return "Карта · " + datetime.now(timezone.utc).strftime("%d.%m.%y")
+        return "Карта · " + datetime.now(timezone.utc).strftime("%d.%m.%Y")
     newest_first = visible[::-1]
     if len(newest_first) <= 2:
         return " + ".join(newest_first)[:150]
@@ -276,6 +276,15 @@ def photo_layer_date(item: dict) -> str:
         except ValueError:
             pass
     return str(item.get("captured_at") or "")[:10]
+
+
+def gallery_display_date(item: dict) -> str:
+    """Format dates for display without changing ISO sort keys or storage."""
+    raw = photo_layer_date(item)
+    try:
+        return date.fromisoformat(raw).strftime("%d.%m.%Y")
+    except (ValueError, TypeError):
+        return raw
 
 
 def sorted_gallery(items: list[dict]) -> list[dict]:

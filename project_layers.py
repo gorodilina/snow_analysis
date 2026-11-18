@@ -5,6 +5,25 @@ import secrets
 from datetime import date, timedelta
 from typing import Any
 
+CONTOUR_COLORS = {
+    "snow": "#00ffff",
+    "iso_-5": "#536bd7",
+    "iso_0": "#ff3472",
+    "iso_5": "#fa9c40",
+    "iso_10": "#f6da4f",
+}
+
+
+def contour_flags(map_state: dict | None) -> dict[str, bool]:
+    """Migrate the former one-switch contour mode into five independent flags."""
+    state = map_state if isinstance(map_state, dict) else {}
+    saved = state.get("analysis_toggles")
+    if isinstance(saved, dict):
+        return {key: bool(saved.get(key, False)) for key in CONTOUR_COLORS}
+    value = bool(state.get("analysis_visible", False))
+    return {key: value for key in CONTOUR_COLORS}
+
+
 SATELLITE_CODES = {"Sentinel-2": "S2", "Landsat 8/9": "L8/9"}
 
 

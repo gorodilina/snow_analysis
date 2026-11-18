@@ -111,3 +111,24 @@ def test_canvas_editor_exposes_save_undo_clear():
     assert "tool-arrow" in source and "tool-text" in source
     assert "document.getElementById('undo')" in source
     assert "document.getElementById('clear')" in source
+
+
+def test_portable_zip_preserves_original_and_editable_drawing():
+    from project_archive import build_project_zip, import_project_zip
+    item, original = base_photo()
+    item["annotations"] = normalize_annotations([{
+        "type": "pen", "points": [[.15, .15], [.8, .6]],
+        "color": "#ff0055", "width": .01,
+    }])
+    project = {
+        "name": "Редактируемый маршрут", "routes": [], "points": [],
+        "notes": [], "layers": [], "gallery": [item],
+        "map_state": {},
+    }
+    archive = build_project_zip(project, {item["id"]: original})
+    restored = import_project_zip(archive)
+    saved_item = restored["gallery"][0]
+    assert saved_item["annotations"] == item["annotations"]
+    assert restored["_gallery_media"][item["id"]] == original
+    composited = render_annotations(restored["_gallery_media"][item["id"]], saved_item)
+    assert composited != original

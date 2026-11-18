@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;background:#fff;color:#24303c;font:13px system-ui,sans-serif}
+.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0;padding:9px;border:1px solid #d5dbe2;border-radius:9px;background:#fafbfc}
+.toolbar button,.toolbar input{font:inherit}
+.toolbar button{border:1px solid #c9d0d8;border-radius:6px;background:#fff;padding:7px 10px;cursor:pointer}
+.toolbar button.active{background:#e7f1ff;border-color:#4184c9}
+.toolbar button.primary{background:#2563eb;color:#fff;border-color:#2563eb;font-weight:650}
+.toolbar input[type=text]{min-width:130px;flex:1;max-width:340px;border:1px solid #c9d0d8;border-radius:6px;padding:6px}
+.toolbar input[type=range]{width:75px}
+.canvas-wrap{background:#e3e9f0;border:1px solid #ccd4de;border-radius:8px;overflow:hidden;text-align:center;line-height:0}
+#canvas{display:block;max-width:100%;height:auto;margin:0 auto;touch-action:none;cursor:crosshair}
+#notice{padding:8px 0;color:#687484}
+</style></head>
+<body>
+<div class="toolbar">
+  <button id="tool-pen" class="active">✏️ Рисовать</button>
+  <button id="tool-arrow">↗ Стрелка</button>
+  <button id="tool-text">T Текст</button>
+  <input type="color" id="color" value="#f0004b" title="Цвет">
+  <label>Толщина <input type="range" id="thickness" min="2" max="25" value="6"></label>
+  <input type="text" id="text-value" maxlength="100" placeholder="Текст подписи"/>
+  <button id="undo">↶ Отменить</button>
+  <button id="clear">Очистить пометки</button>
+  <button class="primary" id="save">Сохранить пометки</button>
+</div>
+<div class="canvas-wrap"><canvas id="canvas" aria-label="Редактируемое изображение галереи"></canvas></div>
+<div id="notice">Исходное изображение сохраняется отдельно; рисование не уничтожает оригинал.</div>
+<script>
+'use strict';
+const canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d');
+const image=new Image();
+let loadedKey='',imageId='',strokes=[],draft=null,tool='pen',ready=false,dirty=false,renderSeq=0;
+const tools=['pen','arrow','text'];
+function componentValue(value){
+  window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setComponentValue',
+    value:value,dataType:'json'},'*');
+}
+function frameHeight(){
+  window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:setFrameHeight',
+    height:Math.ceil(document.body.scrollHeight)+12},'*');
+}
+function sizeUnits(){return Math.min(canvas.width,canvas.height)}
+function linePixels(width){return Math.max(1,width*sizeUnits())}
+function scaledPoint(e){
+  const box=canvas.getBoundingClientRect();
+  return [
+    +Math.max(0,Math.min(1,(e.clientX-box.left)/box.width)).toFixed(5),
+    +Math.max(0,Math.min(1,(e.clientY-box.top)/box.height)).toFixed(5)
+  ];
+}
+function pixelPair(point){return [point[0]*canvas.width,point[1]*canvas.height]}
+function paintStroke(s){
+  const pts=s.points.map(pixelPair);
+  ctx.strokeStyle=s.color;ctx.fillStyle=s.color;
+  ctx.lineWidth=linePixels(s.width);ctx.lineCap='round';ctx.lineJoin='round';
+  if(s.type==='text'){
+    const size=Math.max(12,Math.round(linePixels(s.width)*5));
+    ctx.font=size+'px system-ui,Arial,sans-serif';
+    ctx.lineWidth=2;ctx.strokeStyle='rgba(0,0,0,.35)';
+    ctx.strokeText(s.text,pts[0][0],pts[0][1]);
+    ctx.fillText(s.text,pts[0][0],pts[0][1]);
+    return;
+  }
+  if(s.type==='pen'){
+    if(pts.length===1){
+      ctx.beginPath();ctx.arc(pts[0][0],pts[0][1],Math.max(1,ctx.lineWidth/2),0,Math.PI*2);ctx.fill();
+    }else{
+      ctx.beginPath();
+      pts.forEach((p,i)=>{if(!i)ctx.moveTo(...p);else ctx.lineTo(...p)});
+      ctx.stroke();
+    }
+  }else if(s.type==='arrow'&&pts.length===2){
+    const [a,b]=pts;
+    ctx.beginPath();ctx.moveTo(...a);ctx.lineTo(...b);ctx.stroke();
+    const angle=Math.atan2(b[1]-a[1],b[0]-a[0]);
+    const r=Math.max(9,ctx.lineWidth*5);
+    ctx.beginPath();ctx.moveTo(...b);
+    ctx.lineTo(b[0]-r*Math.cos(angle-Math.PI/6),b[1]-r*Math.sin(angle-Math.PI/6));
+    ctx.lineTo(b[0]-r*Math.cos(angle+Math.PI/6),b[1]-r*Math.sin(angle+Math.PI/6));
+    ctx.closePath();ctx.fill();
+  }
+}
+function render(){
+  if(!ready)return;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(image,0,0,canvas.width,canvas.height);
+  for(const stroke of strokes)paintStroke(stroke);
+  if(draft)paintStroke(draft);
+  frameHeight();
+}
+function activate(next){
+  tool=next;
+  for(const name of tools)
+    document.getElementById('tool-'+name).classList.toggle('active',name===tool);
+}
+tools.forEach(name=>document.getElementById('tool-'+name).onclick=()=>activate(name));
+function freshStroke(type,points){
+  return {type:type,points:points,color:document.getElementById('color').value,
+    width:+(Number(document.getElementById('thickness').value)/1000).toFixed(5)};
+}
+canvas.onpointerdown=e=>{
+  if(!ready)return;
+  const point=scaledPoint(e);
+  if(tool==='text'){
+    const label=document.getElementById('text-value').value.trim();
+    if(!label){document.getElementById('notice').textContent='Сначала введите текст подписи.';return}
+    strokes.push({...freshStroke('text',[point]),text:label.slice(0,100)});
+    dirty=true;render();return;
+  }
+  draft=freshStroke(tool==='arrow'?'arrow':'pen',tool==='arrow'?[point,point]:[point]);
+  canvas.setPointerCapture(e.pointerId);
+  render();
+};
+canvas.onpointermove=e=>{
+  if(!draft)return;
+  const p=scaledPoint(e);
+  if(draft.type==='arrow'){
+    draft.points[1]=p;
+  }else{
+    const last=draft.points[draft.points.length-1];
+    const dx=p[0]-last[0],dy=p[1]-last[1];
+    if((dx*dx+dy*dy)>.000008 && draft.points.length<350)draft.points.push(p);
+  }
+  render();
+};
+function finishPointer(e){
+  if(!draft)return;
+  const p=scaledPoint(e);
+  if(draft.type==='arrow')draft.points[1]=p;
+  if(draft.points.length>0){strokes.push(draft);dirty=true;}
+  draft=null;render();
+}
+canvas.onpointerup=finishPointer;
+canvas.onpointercancel=e=>{draft=null;render()};
+document.getElementById('undo').onclick=()=>{if(strokes.length){strokes.pop();dirty=true;render()}};
+document.getElementById('clear').onclick=()=>{strokes=[];dirty=true;render()};
+document.getElementById('save').onclick=()=>{
+  if(!ready)return;
+  componentValue({action:'save_annotations',item_id:imageId,annotations:strokes,
+    event_id:Date.now()+'-'+Math.random().toString(36).slice(2)});
+  dirty=false;
+  document.getElementById('notice').textContent='Пометки отправлены на сохранение.';
+};
+window.addEventListener('message',event=>{
+  const data=event.data;
+  if(!data||data.type!=='streamlit:render')return;
+  const args=data.args||{};
+  const key=String(args.image_id||'')+':'+String(args.revision||'');
+  if(key===loadedKey)return;
+  if(dirty&&String(args.image_id||'')===imageId){
+    // Ordinary Streamlit rerenders must not discard drawings in progress.
+    return;
+  }
+  loadedKey=key;imageId=String(args.image_id||'');
+  const seq=++renderSeq;
+  image.onload=()=>{
+    if(seq!==renderSeq)return;
+    canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;
+    ready=true;render();
+  };
+  image.onerror=()=>{ready=false;document.getElementById('notice').textContent='Не удалось открыть изображение.'};
+  strokes=Array.isArray(args.annotations)?JSON.parse(JSON.stringify(args.annotations)):[];
+  dirty=false;
+  image.src=String(args.image_url||'');
+});
+if('ResizeObserver' in window)new ResizeObserver(frameHeight).observe(document.body);
+window.parent.postMessage({isStreamlitMessage:true,type:'streamlit:componentReady',apiVersion:1},'*');
+</script>
+</body></html>

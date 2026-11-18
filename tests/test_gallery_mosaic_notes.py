@@ -88,9 +88,32 @@ def test_research_note_single_widget():
     root = Path(__file__).resolve().parents[1]
     at = AppTest.from_file(root / "app.py", default_timeout=30).run()
     assert not at.exception
-    matched = [a for a in at.text_area if a.label == "Заметки об исследовании"]
+    matched = [a for a in at.text_area if a.label == "Доступны к выгрузке вместе с галереей"]
     assert len(matched) == 1
     assert not any(b.label == "Добавить заметку" for b in at.button)
     matched[0].set_value("Текущий снеговой покров — 2300 м").run()
     assert not at.exception
     assert at.session_state["research_note"] == "Текущий снеговой покров — 2300 м"
+
+
+def test_gallery_paste_zone_is_separate_from_full_width_mosaic():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "app.py").read_text(encoding="utf-8")
+    mosaic_py = (root / "gallery_mosaic.py").read_text(encoding="utf-8")
+    mosaic_html = (root / "gallery_mosaic/index.html").read_text(encoding="utf-8")
+    assert 'st.columns(2, gap="medium")' in app
+    assert 'accept_gallery_paste(gallery_paste())' in app
+    assert 'render_gallery_export(items)' in app
+    assert 'mosaic_event = gallery_mosaic(cards)' in app
+    assert app.index('accept_gallery_paste(gallery_paste())') < app.index('mosaic_event = gallery_mosaic(cards)')
+    assert 'paste_only=True' in mosaic_py and 'paste_only=False' in mosaic_py
+    assert "pasteOnlyMode=Boolean(args.paste_only)" in mosaic_html
+
+
+def test_help_dialog_and_median_label_are_present():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "app.py").read_text(encoding="utf-8")
+    assert '@st.dialog("Возможности приложения", width="large")' in app
+    assert 'if st.button("ⓘ Возможности приложения"' in app
+    assert '["Конкретный снимок", "Медиана"]' in app
+    assert 'st.session_state["mode"] = "Медиана"' in app

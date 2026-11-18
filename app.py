@@ -48,7 +48,7 @@ st.set_page_config(page_title="Анализ снежной обстановки"
 st.markdown("""<style>
 .block-container{padding-top:1.3rem;padding-bottom:1rem;max-width:none}
 [data-testid="stSidebar"]{min-width:335px}
-.median-heading{display:flex;align-items:center;justify-content:space-between;margin:0 0 .5rem;font-size:1rem}
+.mode-help-wrap{display:flex;align-items:center;justify-content:center;min-height:25px}
 .median-help-icon{display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;
  border:1px solid #7b8794;border-radius:50%;color:#64748b;font:600 13px/1 sans-serif;
  position:relative;cursor:help;outline-offset:3px}
@@ -626,7 +626,7 @@ def show_app_capabilities() -> None:
         """
 **Маршрут и точки.** Загрузите KML/GPX-треки, CSV с точками или добавьте точки вручную. Управляйте отображением треков и подписей на карте.
 
-**Спутниковые снимки.** Просматривайте отдельные сцены Sentinel-2 и Landsat 8/9 или создавайте медиану за выбранный период. Видимость и прозрачность слоёв настраиваются. Выбирайте параметры так, чтобы из-под снимка проглядывала карта-подложка. Удобнее всего использовать OpenTopoMap или «Рельеф (Esri)».
+**Спутниковые снимки.** Просматривайте отдельные сцены Sentinel-2 и Landsat 8/9 или создавайте медиану за выбранный период. Видимость и прозрачность слоёв настраиваются. Выбирайте параметры так, чтобы из-под снимка проглядывала карта-подложка. Удобнее всего использовать OpenTopoMap.
 
 **Снег и температура.** Для снимков доступны граница снега по NDSI и изотермы −5, 0, +5, +10 °C на основе ERA5-Land.
 
@@ -674,7 +674,23 @@ with st.sidebar:
 
     st.divider()
     st.subheader("2. Спутниковые снимки")
-    mode = st.radio("Режим", ["Конкретный снимок", "Медиана"], key="mode")
+    mode_column, median_help_column = st.columns(
+        [9, 1], gap="small", vertical_alignment="bottom"
+    )
+    with mode_column:
+        mode = st.radio("Режим", ["Конкретный снимок", "Медиана"], key="mode")
+    with median_help_column:
+        st.markdown(
+            """<div class="mode-help-wrap">
+<span class="median-help-icon" tabindex="0" aria-describedby="median-help-text">?
+<span id="median-help-text" class="median-help-content" role="tooltip">
+Медиана — изображение, в котором для каждого пикселя и канала берётся медианное
+значение по спутниковым сценам выбранного периода. Это уменьшает влияние
+случайных изменений. В этом приложении RGB-медиана вычисляется без маски облаков,
+поэтому облака могут оставаться. Медиана не является снимком на
+конкретную дату.
+</span></span></div>""", unsafe_allow_html=True,
+        )
     if mode == "Медиана":
         satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
     else:
@@ -887,17 +903,7 @@ with st.sidebar:
         else:
             st.caption("Выберите год и месяц, затем нажмите «Найти доступные даты».")
     else:
-        st.markdown(
-            """<div class="median-heading"><strong>3. Медиана</strong>
-<span class="median-help-icon" tabindex="0" aria-describedby="median-help-text">?
-<span id="median-help-text" class="median-help-content" role="tooltip">
-Медиана — изображение, в котором для каждого пикселя и канала берётся медианное
-значение по спутниковым сценам выбранного периода. Это уменьшает влияние
-случайных изменений. В этом приложении RGB-медиана вычисляется без маски облаков,
-поэтому облака могут оставаться. Медиана не является снимком на
-конкретную дату.
-</span></span></div>""", unsafe_allow_html=True,
-        )
+        st.markdown("**3. Медиана**")
         median_start = st.date_input(
             "Первый день интервала", value=date(2025, 6, 1),
             key="median_start", format="DD.MM.YYYY"

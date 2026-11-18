@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" onerror="this.onerror=null;this.removeAttribute('integrity');this.href='https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css'" />
+<style>
+html,body,#map{margin:0;width:100%;height:100%;font-family:system-ui,-apple-system,Arial,sans-serif}
+#map{background:#e8eef0}
+#layer-control{position:absolute;z-index:1000;top:12px;right:12px;width:min(310px,calc(100% - 24px));box-shadow:0 4px 16px #0002;border:1px solid #ccd3d9;border-radius:12px;background:#fff;color:#1c2930;overflow:hidden;font-size:13px}
+#layers-head{width:100%;border:0;background:#fff;padding:11px 13px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;text-align:left;font-weight:700;font-size:14px}
+#layers-body{max-height:55vh;overflow:auto;padding:3px 12px 12px}
+#layer-control.collapsed #layers-body{display:none}
+.layer-row{border-top:1px solid #edf0f2;padding:8px 0 6px}
+.layer-row-head{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.layer-delete{width:24px;height:24px;line-height:18px;border-radius:6px;border:1px solid #ddd;background:#fff;color:#9b2332;cursor:pointer;font-size:17px;flex-shrink:0}
+.layer-delete:hover{background:#fff0f2;border-color:#cc6677}
+.layer-section{margin-top:10px;margin-bottom:3px;font-weight:700}
+.layer-check{display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:550}
+.layer-check input{accent-color:#2667b7;width:16px;height:16px;flex-shrink:0}
+.contour-switch{padding:5px 0;border-top:1px solid #f2f4f7}
+.contour-swatch{display:inline-block;width:22px;flex-shrink:0;border-top:3px solid;border-radius:2px}
+.opacity-row{padding:5px 0 0 23px;display:flex;gap:8px;align-items:center;color:#5d6873;font-size:11px}
+.opacity-row input{flex:1;min-width:50px}
+.base-opt{display:block;padding:5px 0;cursor:pointer}
+.base-opt input{accent-color:#2667b7}
+.label-icon{white-space:nowrap;background:rgba(255,255,255,.88);font-weight:600;color:#222;padding:2px 5px;border:1px solid #5558;border-radius:4px;font-size:11px;text-shadow:0 1px 1px #fff;box-shadow:0 1px 3px #0002}
+.leaflet-control-attribution{font-size:9px !important}
+#capture-control{position:absolute;z-index:10000000;top:12px;left:58px;max-width:calc(100% - 410px);display:flex;flex-wrap:wrap;gap:5px;align-items:center;background:#fff;padding:7px;border:1px solid #ccd3d9;border-radius:9px;box-shadow:0 2px 8px #0002;font-size:12px}
+#capture-control button,#capture-control select{font:inherit;border:1px solid #b8c5cf;background:#fff;border-radius:5px;padding:5px 7px;cursor:pointer;color:#1c2930}
+#capture-control button:disabled{opacity:.45;cursor:default}
+#capture-status{font-size:11px;color:#475569}
+#layer-control{z-index:10000001}
+#top-note{z-index:10000000}
+@media(max-width:780px){#capture-control{top:65px;left:10px;max-width:calc(100% - 20px)}#layer-control{width:220px}}
+.capture-selection-overlay,.capturing-map .capture-selection-overlay{stroke:#2368cb}
+.capturing-map .capture-selection-overlay{display:none!important;visibility:hidden!important}
+#top-note{position:absolute;z-index:900;bottom:28px;left:12px;background:#fffffff0;padding:7px 10px;border-radius:7px;font-size:12px;max-width:65%;pointer-events:none;box-shadow:0 1px 6px #0002}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="capture-control">
+  <button type="button" id="select-area">▢ Выделить область</button>
+  <select id="capture-format" aria-label="Формат снимка">
+    <option value="png">PNG</option>
+    <option value="jpg">JPG</option>
+  </select>
+  <button type="button" id="save-area" disabled>В галерею</button>
+  <button type="button" id="cancel-area">✕</button>
+  <span id="capture-status"></span>
+</div>
+<div id="layer-control">
+  <button id="layers-head" type="button"><span>☷ Слои карты</span><span id="arrow">▾</span></button>
+  <div id="layers-body">
+    <b>Подложка</b><div id="basemaps"></div>
+    <div class="layer-section">Снимки (новые поверх старых)</div>
+    <div id="image-overlays"></div>
+    <div class="layer-section">Аналитика и маршрут</div>
+    <div id="overlays"></div>
+    <div style="margin-top:10px;color:#6b7280;font-size:11px">Отметьте нужные контуры. Для каждого снимка линии повторяют его прозрачность.</div>
+  </div>
+</div>
+<div id="top-note"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js" crossorigin="anonymous"></script>
+<script>
+'use strict';
+// v1 bidirectional Streamlit component: the parent sends config on render.
+let activeMap = null;
+let activeResizeObserver = null;
+let activeResizeHandler = null;
+let lastRenderId = null;
+let activeSnapshotTimer = null;
+let mapEventCounter = 0;
+function nextMapEventId() {
+  // Distinct even if two captures occur during the same millisecond.
+  return String(Date.now()) + '-' + String(++mapEventCounter);
+}
+function setComponentValue(value) {
+  window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: 'streamlit:setComponentValue',
+    value: value,
+    dataType: 'json'
+  }, '*');
+}
+function initializeMap(config) {
+clearTimeout(activeSnapshotTimer);
+if (activeResizeObserver) { activeResizeObserver.disconnect(); activeResizeObserver=null; }
+if (activeResizeHandler) { window.removeEventListener('resize',activeResizeHandler); activeResizeHandler=null; }
+if (activeMap) {
+  activeMap.remove();
+  document.getElementById('map').innerHTML='';
+}
+// Reinitialize the controls as well as the Leaflet map.
+document.getElementById('basemaps').replaceChildren();
+document.getElementById('overlays').replaceChildren();
+document.getElementById('image-overlays').replaceChildren();
+const restored = config.mapState || {};
+let canReportChanges = false;
+let drawingArea = false, originLatLng = null, areaRect = null;
+let chosenBounds = Array.isArray(restored.selection_bounds) ? restored.selection_bounds : null;
+let captureBusy = false;
+function collectState() {
+  const c=map.getCenter();
+  const namedBase=Object.keys(bases).find(name=>bases[name]===currentBase) || 'Рельеф (Esri)';
+  const layerState={};
+  for (const o of overlays) {
+    if (o.role !== 'image') continue;
+    layerState[o.id]={
+      visible:map.hasLayer(o.layer),
+      opacity:Number(o.layer.options.opacity ?? 0)
+    };
+  }
+  return {
+    base:namedBase,
+    overlays:layerState,
+    analysis_toggles:{...analysisToggles},
+    selection_bounds:chosenBounds,
+    track:map.hasLayer(routeGroup),
+    points:map.hasLayer(pointGroup),
+    labels:map.hasLayer(labelGroup),
+    center:[Number(c.lat.toFixed(6)), Number(c.lng.toFixed(6))],
+    zoom:map.getZoom()
+  };
+}
+function reportChange() {
+  if (!canReportChanges) return;
+  clearTimeout(activeSnapshotTimer);
+  activeSnapshotTimer=setTimeout(()=>{
+    setComponentValue({map_state:collectState(), event_id:nextMapEventId()});
+  },700);
+}
+
+const map = L.map('map', {zoomControl:true, preferCanvas:true});
+activeMap = map;
+// Each image gets its own RGB/snow/isotherm stack:
+// RGB(i) < snow(i) < isotherms(i) < RGB(i+1) < route < points.
+// No CSS layer is globally on top of imagery of a later acquisition.
+const imageIds=(config.tiles||[]).filter(t=>t.role==='image').map(t=>t.id);
+for (const [index,id] of imageIds.entries()) {
+  for (const [kind,offset] of [['image',0],['snow',1],['isotherm',2]]) {
+    const paneName=kind+'_'+id;
+    map.createPane(paneName);
+    map.getPane(paneName).style.zIndex=String(300+index*4+offset);
+  }
+}
+const routeZ=320+imageIds.length*4;
+for (const [pane,offset] of [['routePane',0],['pointPane',1],['labelPane',2]]) {
+  map.createPane(pane);
+  map.getPane(pane).style.zIndex=String(routeZ+offset);
+}
+// The selection uses its OWN SVG renderer, even though the map uses
+// preferCanvas for tracks. It must never be baked into the route canvas.
+map.createPane('selectionPane');
+map.getPane('selectionPane').style.zIndex=String(routeZ+5);
+const selectionRenderer=L.svg({pane:'selectionPane'});
+const bases = {
+  'Рельеф (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,crossOrigin:true,attribution:'Tiles © Esri, HERE, Garmin, OpenStreetMap contributors'}),
+  'OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {maxZoom:17,crossOrigin:true,attribution:'© OpenTopoMap (CC-BY-SA), © OpenStreetMap contributors'}),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,crossOrigin:true,attribution:'© OpenStreetMap contributors'}),
+  'Снимки Esri (подложка)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom:19,crossOrigin:true,attribution:'Imagery © Esri and providers'})
+};
+let currentBase = bases[restored.base] || bases['Рельеф (Esri)'];
+currentBase.addTo(map);
+let baseErrorCount = 0;
+let switchedBaseAutomatically = false;
+currentBase.on('tileerror',()=>{
+  baseErrorCount++;
+  if (baseErrorCount>=4 && !switchedBaseAutomatically && map.hasLayer(currentBase)) {
+    switchedBaseAutomatically=true;
+    map.removeLayer(currentBase);
+    currentBase=bases['OpenStreetMap'];
+    currentBase.addTo(map);
+    currentBase.bringToBack();
+    const osmRadio = document.querySelector('input[name="base"][value="OpenStreetMap"]');
+    if (osmRadio) osmRadio.checked=true;
+    document.getElementById('top-note').textContent=(config.caption||'Карта')+
+      ' · рельефная подложка недоступна, автоматически включена OpenStreetMap';
+  }
+});
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+const routeGroup = L.featureGroup();
+for (const item of config.routes){
+  if (!item.coordinates || item.coordinates.length < 2) continue;
+  let latlngs = item.coordinates.map(p=>[p[1],p[0]]);
+  L.polyline(latlngs, {pane:'routePane',color:'#ff148e',weight:4,opacity:.95}).bindPopup(esc(item.name)).addTo(routeGroup);
+}
+if (restored.track !== false) routeGroup.addTo(map);
+const pointGroup = L.featureGroup();
+const labelGroup = L.featureGroup();
+for (const point of config.points){
+  const [lon,lat] = point.coordinates;
+  L.circleMarker([lat,lon], {pane:'pointPane',radius:5,color:'#1c2530',weight:1.2,fillColor:'#ffe447',fillOpacity:1})
+    .bindPopup('<b>'+esc(point.name)+'</b><div>'+lat.toFixed(5)+', '+lon.toFixed(5)+'</div>').addTo(pointGroup);
+  const tag = L.divIcon({className:'', html:'<span class="label-icon">'+esc(point.name)+'</span>',iconSize:null,iconAnchor:[-10,4]});
+  L.marker([lat,lon], {pane:'labelPane',icon:tag,interactive:false}).addTo(labelGroup);
+}
+if (restored.points !== false) pointGroup.addTo(map);
+if (restored.labels === true) labelGroup.addTo(map);
+// Labels: users control their visibility in the map's Layers menu.
+const contourInfo=[
+  {key:'snow',name:'Граница снега (NDSI)',color:'#00ffff'},
+  {key:'iso_-5',name:'Изотерма −5 °C',color:'#536bd7'},
+  {key:'iso_0',name:'Изотерма 0 °C',color:'#ff3472'},
+  {key:'iso_5',name:'Изотерма +5 °C',color:'#fa9c40'},
+  {key:'iso_10',name:'Изотерма +10 °C',color:'#f6da4f'}
+];
+const oldAnalysisVisible=restored.analysis_visible === true;
+const savedContours=restored.analysis_toggles||{};
+let analysisToggles=Object.fromEntries(contourInfo.map(x=>[
+  x.key,Object.prototype.hasOwnProperty.call(savedContours,x.key)
+    ? savedContours[x.key]===true : oldAnalysisVisible
+]));
+const overlays = [];
+for (const entry of config.tiles) {
+  if (!entry.url) continue;
+  const role=entry.role||'image';
+  const id=entry.id||entry.name;
+  const source=entry.source_id||id;
+  const saved=(restored.overlays||{})[id]||{};
+  const opacity=role==='image' && typeof saved.opacity==='number'
+    ? saved.opacity : entry.opacity;
+  const visible=role==='image' && typeof saved.visible==='boolean'
+    ? saved.visible : entry.visible;
+  const pane=(role==='image'?'image_':(role==='snow'?'snow_':'isotherm_'))+source;
+  const layer=L.tileLayer(entry.url, {
+    pane:pane, opacity:opacity, maxZoom:20,
+    attribution:'© Google Earth Engine / Copernicus / USGS',crossOrigin:true
+  });
+  if (role==='image' && visible) layer.addTo(map);
+  let errors=0;
+  layer.on('tileerror',()=>{
+    errors++;
+    if (errors===4) {
+      document.getElementById('top-note').textContent=
+        'Не удалось загрузить тайлы «'+entry.name+'». Попробуйте обновить снимки.';
+    }
+  });
+  overlays.push({
+    id:id,sourceId:source,name:entry.name,layer:layer,visible:visible,
+    opacity:opacity,baseOpacity:entry.opacity,role:role,
+    analysisKey:entry.analysis_key || (role==='snow'?'snow':null),checkbox:null
+  });
+}
+function refreshDependentLayers(sourceId){
+  const parent=overlays.find(o=>o.role==='image' && o.id===sourceId);
+  for (const other of overlays.filter(o=>o.role!=='image' && o.sourceId===sourceId)) {
+    if(parent && analysisToggles[other.analysisKey] && map.hasLayer(parent.layer)) {
+      other.layer.setOpacity(parent.opacity * other.baseOpacity);
+      if (!map.hasLayer(other.layer)) other.layer.addTo(map);
+    } else {
+      map.removeLayer(other.layer);
+    }
+  }
+}
+function refreshAllDependents() {
+  overlays.filter(o=>o.role==='image').forEach(o=>refreshDependentLayers(o.id));
+}
+refreshAllDependents();
+const basemapDiv=document.querySelector('#basemaps');
+for (const [name, layer] of Object.entries(bases)) {
+  const row=document.createElement('label');row.className='base-opt';
+  const input=document.createElement('input');input.type='radio';input.name='base';input.value=name;input.checked=layer===currentBase;
+  input.onchange=()=>{map.removeLayer(currentBase);currentBase=layer;currentBase.addTo(map);currentBase.bringToBack();reportChange();};
+  row.append(input, document.createTextNode(' '+name));basemapDiv.append(row);
+}
+const overlayDiv=document.querySelector('#overlays');
+const imageryDiv=document.querySelector('#image-overlays');
+function addCheck(name, layer, initial, opacity, option={}) {
+  const wrapper=document.createElement('div');
+  wrapper.className='layer-row';
+  const head=document.createElement('div');
+  head.className='layer-row-head';
+  const label=document.createElement('label');
+  label.className='layer-check';
+  const checkbox=document.createElement('input');
+  checkbox.type='checkbox';
+  checkbox.checked=initial;
+  label.append(checkbox,document.createTextNode(name));
+  head.append(label);
+  wrapper.append(head);
+  checkbox.onchange=()=>{
+    checkbox.checked?map.addLayer(layer):map.removeLayer(layer);
+    const obj=overlays.find(o=>o.id===option.id);
+    if(obj && obj.role==='image') {
+      obj.visible=checkbox.checked;
+      refreshDependentLayers(obj.id);
+    }
+    reportChange();
+  };
+  if (option.removable && option.id) {
+    const del=document.createElement('button');
+    del.type='button';
+    del.className='layer-delete';
+    del.textContent='×';
+    del.title='Удалить снимок из исследования';
+    del.setAttribute('aria-label','Удалить слой '+name);
+    del.onclick=()=>{
+      const index=overlays.findIndex(o=>o.id===option.id && o.role==='image');
+      if (index<0) return;
+      const image=overlays[index];
+      for(let j=overlays.length-1;j>=0;j--) {
+        if(overlays[j].sourceId===image.id) {
+          map.removeLayer(overlays[j].layer);
+          overlays.splice(j,1);
+        }
+      }
+      wrapper.remove();
+      clearTimeout(activeSnapshotTimer);
+      setComponentValue({
+        action:'delete_layer',layer_id:image.id,
+        map_state:collectState(),event_id:nextMapEventId()
+      });
+    };
+    head.append(del);
+  }
+  if (opacity!==null && opacity!==undefined && layer.setOpacity){
+    const line=document.createElement('div');
+    line.className='opacity-row';
+    const caption=document.createElement('span');caption.textContent='Непрозрачность';
+    const slider=document.createElement('input');
+    slider.type='range';slider.min=0;slider.max=100;slider.step=5;
+    slider.value=Math.round(opacity*100);
+    const percent=document.createElement('span');percent.textContent=slider.value+'%';
+    slider.oninput=()=>{
+      const val=Number(slider.value)/100;
+      layer.setOpacity(val);
+      const obj=overlays.find(o=>o.id===option.id);
+      if(obj && obj.role==='image') {
+        obj.opacity=val;
+        refreshDependentLayers(obj.id);
+      }
+      percent.textContent=slider.value+'%';
+      reportChange();
+    };
+    line.append(caption,slider,percent);wrapper.append(line);
+  }
+  (option.role==='image'?imageryDiv:overlayDiv).append(wrapper);
+  return checkbox;
+}
+for (const item of overlays) {
+  if(item.role!=='image') continue;
+  item.checkbox=addCheck(item.name,item.layer,item.visible,item.opacity,{
+    id:item.id,removable:true,role:item.role
+  });
+}
+const legend=document.createElement('div');
+legend.className='contour-legend';
+for (const info of contourInfo) {
+  const row=document.createElement('label');
+  row.className='layer-check layer-row contour-switch';
+  const check=document.createElement('input');
+  check.type='checkbox';check.checked=analysisToggles[info.key];
+  const swatch=document.createElement('span');
+  swatch.className='contour-swatch';swatch.style.borderColor=info.color;
+  row.append(check,swatch,document.createTextNode(info.name));
+  check.onchange=()=>{
+    analysisToggles[info.key]=check.checked;
+    refreshAllDependents();
+    reportChange();
+  };
+  legend.append(row);
+}
+overlayDiv.append(legend);
+addCheck('Трек',routeGroup,restored.track !== false,null);
+addCheck('Точки / препятствия',pointGroup,restored.points !== false,null);
+addCheck('Подписи точек',labelGroup,restored.labels === true,null);
+// The selection rectangle is intentionally above image layers but omitted
+// from the gallery screenshot itself. Coordinates are WGS84 [W,S,E,N].
+const captureStatus=document.getElementById('capture-status');
+const saveAreaButton=document.getElementById('save-area');
+function setSelectedBounds(bounds) {
+  chosenBounds=bounds;
+  if(areaRect) map.removeLayer(areaRect);
+  if(bounds) {
+    areaRect=L.rectangle([[bounds[1],bounds[0]],[bounds[3],bounds[2]]],{
+      pane:'selectionPane',renderer:selectionRenderer,className:'capture-selection-overlay',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+    }).addTo(map);
+    saveAreaButton.disabled=false;
+    captureStatus.textContent='Область выбрана';
+  } else {
+    areaRect=null;
+    saveAreaButton.disabled=true;
+    captureStatus.textContent='';
+  }
+}
+if(chosenBounds) setSelectedBounds(chosenBounds);
+document.getElementById('select-area').onclick=()=>{
+  if(captureBusy) return;
+  drawingArea=true;
+  originLatLng=null;
+  map.dragging.disable();
+  captureStatus.textContent='Протяните прямоугольник мышью по карте';
+};
+document.getElementById('cancel-area').onclick=()=>{
+  drawingArea=false;originLatLng=null;map.dragging.enable();
+  setSelectedBounds(null);reportChange();
+};
+map.on('mousedown',e=>{
+  if(!drawingArea || (e.originalEvent && e.originalEvent.button!==0)) return;
+  originLatLng=e.latlng;
+  setSelectedBounds(null);
+});
+map.on('mousemove',e=>{
+  if(!drawingArea || !originLatLng) return;
+  const west=Math.min(originLatLng.lng,e.latlng.lng);
+  const east=Math.max(originLatLng.lng,e.latlng.lng);
+  const south=Math.min(originLatLng.lat,e.latlng.lat);
+  const north=Math.max(originLatLng.lat,e.latlng.lat);
+  if(areaRect)map.removeLayer(areaRect);
+  areaRect=L.rectangle([[south,west],[north,east]],{
+    pane:'selectionPane',renderer:selectionRenderer,className:'capture-selection-overlay',color:'#2368cb',weight:2,dashArray:'6 5',fillOpacity:.10
+  }).addTo(map);
+});
+map.on('mouseup',e=>{
+  if(!drawingArea || !originLatLng) return;
+  const west=Math.min(originLatLng.lng,e.latlng.lng);
+  const east=Math.max(originLatLng.lng,e.latlng.lng);
+  const south=Math.min(originLatLng.lat,e.latlng.lat);
+  const north=Math.max(originLatLng.lat,e.latlng.lat);
+  drawingArea=false;originLatLng=null;map.dragging.enable();
+  if(Math.abs(east-west)<0.00001 || Math.abs(north-south)<0.00001) {
+    setSelectedBounds(null);return;
+  }
+  setSelectedBounds([west,south,east,north]);
+  // Do not force an immediate Streamlit rerun while the next click is about
+  // to capture a photo. The bounds are still returned in map_state.
+  reportChange();
+});
+saveAreaButton.onclick=async()=>{
+  if(captureBusy || !chosenBounds) return;
+  if(typeof window.html2canvas!=='function') {
+    captureStatus.textContent='Сервис снимка карты недоступен';return;
+  }
+  clearTimeout(activeSnapshotTimer); // pending move/selection event must not overwrite capture
+  captureBusy=true;saveAreaButton.disabled=true;
+  const startCaptureMs=performance.now();
+  captureStatus.textContent='Готовлю выделенный фрагмент карты…';
+  try {
+    const southWest=map.latLngToContainerPoint([chosenBounds[1],chosenBounds[0]]);
+    const northEast=map.latLngToContainerPoint([chosenBounds[3],chosenBounds[2]]);
+    const minX=Math.min(southWest.x,northEast.x),maxX=Math.max(southWest.x,northEast.x);
+    const minY=Math.min(southWest.y,northEast.y),maxY=Math.max(southWest.y,northEast.y);
+    const size=map.getSize();
+    if(minX < -1 || minY < -1 || maxX > size.x + 1 || maxY > size.y + 1)
+      throw Error('Область не целиком на экране. Выделите её заново.');
+    const left=Math.max(0,minX),top=Math.max(0,minY);
+    const right=Math.min(size.x,maxX),bottom=Math.min(size.y,maxY);
+    if(right-left<12 || bottom-top<12) throw Error('Слишком маленькая область.');
+    const originalRect=areaRect;
+    document.body.classList.add('capturing-map');
+    if(originalRect)map.removeLayer(originalRect);
+    // Wait for Leaflet's SVG renderer and html2canvas's DOM clone to observe
+    // the removal. The highlight is excluded BOTH in live CSS and the clone.
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const cropWidth=Math.ceil(right-left), cropHeight=Math.ceil(bottom-top);
+    // Rendering only the chosen rectangle avoids a costly 10MP render of
+    // the ENTIRE map before a second large canvas cropping operation.
+    const scale=Math.min(2.8,Math.sqrt(9500000/(cropWidth*cropHeight)));
+    const mapRect=map.getContainer().getBoundingClientRect();
+    let finalCanvas;
+    try {
+      finalCanvas=await window.html2canvas(map.getContainer(),{
+        x:mapRect.left+left, y:mapRect.top+top,
+        width:cropWidth,height:cropHeight,
+        useCORS:true,allowTaint:false,backgroundColor:'#f4f4f4',
+        logging:false,scale,
+        ignoreElements:el=>Boolean(el.classList&&(
+          el.classList.contains('leaflet-control-container')||
+          el.classList.contains('capture-selection-overlay')
+        )),
+        onclone:clone=>{
+          clone.querySelectorAll('.capture-selection-overlay').forEach(el=>el.remove());
+        }
+      });
+    } finally {
+      document.body.classList.remove('capturing-map');
+      if(originalRect)originalRect.addTo(map);
+    }
+    captureStatus.textContent='Сжимаю изображение…';
+    const fmt=document.getElementById('capture-format').value;
+    const mime=fmt==='jpg'?'image/jpeg':'image/png';
+    // Async toBlob avoids blocking the browser UI on a huge toDataURL call.
+    const imageBlob=await new Promise(resolve=>
+      finalCanvas.toBlob(resolve,mime,fmt==='jpg'?.95:undefined)
+    );
+    if(!imageBlob)throw Error('Не удалось сформировать изображение.');
+    if(imageBlob.size>8000000)
+      throw Error('Снимок более 8 МБ. Выберите JPG либо меньшую область.');
+    const imageData=await new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>resolve(reader.result);
+      reader.onerror=()=>reject(Error('Не удалось прочитать изображение.'));
+      reader.readAsDataURL(imageBlob);
+    });
+    captureStatus.textContent='Отправляю снимок в приложение…';
+    setComponentValue({
+      action:'capture_image', image_data:imageData,
+      image_format:fmt,bounds:chosenBounds,
+      capture_ms:Math.round(performance.now()-startCaptureMs),
+      map_state:collectState(),event_id:nextMapEventId()
+    });
+    captureStatus.textContent='Снимок отправлен, ожидаю форму над картой…';
+  } catch(error) {
+    captureStatus.textContent='Ошибка: '+String(error.message||error).slice(0,130);
+  } finally {
+    captureBusy=false;saveAreaButton.disabled=!chosenBounds;
+  }
+};
+const bounds=config.bounds;
+if (restored.center && Array.isArray(restored.center) && restored.center.length===2 && Number.isFinite(Number(restored.zoom))) {
+  map.setView(restored.center, restored.zoom);
+} else if (bounds && bounds.length===2) map.fitBounds(bounds,{padding:[32,32],maxZoom:13});
+else map.setView([42.18,46.72],10);
+document.getElementById('top-note').textContent=config.caption||'Без спутникового снимка: сначала выберите дату в панели слева';
+document.getElementById('layers-head').onclick=()=>{
+ const p=document.getElementById('layer-control');p.classList.toggle('collapsed');
+ document.getElementById('arrow').textContent=p.classList.contains('collapsed')?'▸':'▾';
+};
+// Resizing the containing Streamlit element does not require rebuilding the map.
+// Streamlit can resize an iframe after the first layout pass.
+// A delayed invalidateSize keeps tile grids and vector overlays aligned.
+function refreshMapSize(){
+  if (activeMap === map) map.invalidateSize({pan:false,animate:false});
+}
+activeResizeHandler=refreshMapSize;
+window.addEventListener('resize',activeResizeHandler);
+window.requestAnimationFrame(refreshMapSize);
+window.setTimeout(refreshMapSize,250);
+window.setTimeout(refreshMapSize,1000);
+if (window.ResizeObserver) {
+  activeResizeObserver=new ResizeObserver(refreshMapSize);
+  activeResizeObserver.observe(document.getElementById('map'));
+}
+// Do not autosave the initial fitBounds or restored state.
+window.setTimeout(()=>{canReportChanges=true;},900);
+map.on('moveend',reportChange);
+}
+window.addEventListener('message', function(event) {
+  if (!event.data || event.data.type !== 'streamlit:render') return;
+  const args=event.data.args||{};
+  const renderId=String(args.render_id||'initial');
+  if (renderId !== lastRenderId) {
+    lastRenderId=renderId;
+    initializeMap(args.config||{routes:[],points:[],tiles:[]});
+  }
+  window.parent.postMessage({
+    isStreamlitMessage:true,
+    type:'streamlit:setFrameHeight',
+    height:790
+  }, '*');
+});
+window.parent.postMessage({
+  isStreamlitMessage:true,
+  type:'streamlit:componentReady',
+  apiVersion:1
+}, '*');
+</script>
+</body>
+</html>

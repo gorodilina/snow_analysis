@@ -3,7 +3,7 @@ on:
   push:
     branches:
       - feature/shareable-research-sessions
-      - feature/gallery-drawing-contours-2026-11-18
+      - feature/gallery-notes-search-2026-11-18
   pull_request:
     branches:
       - main
@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest
       - name: Compile Python
-        run: python -m compileall -q app.py gee_client.py geo_utils.py google_terrain.py map_builder.py map_component.py session_store.py project_layers.py project_archive.py gallery.py gallery_editor.py geo_export.py tests
+        run: python -m compileall -q app.py gee_client.py geo_utils.py google_terrain.py map_builder.py map_component.py session_store.py project_layers.py project_archive.py gallery.py gallery_editor.py gallery_mosaic.py geo_export.py tests
       - name: Unit tests
         run: python -m pytest tests -q
       - name: Smoke-test Streamlit application
@@ -45,6 +45,7 @@ jobs:
           for filename,target in [
               ('map_component/index.html','/tmp/snow_map.js'),
               ('gallery_editor/index.html','/tmp/snow_gallery_editor.js'),
+              ('gallery_mosaic/index.html','/tmp/snow_gallery_mosaic.js'),
           ]:
               s=pathlib.Path(filename).read_text()
               scripts=re.findall(r'<script(?:\s[^>]*)?>([\s\S]*?)</script>',s)
@@ -54,3 +55,4 @@ jobs:
           PY
           node --check /tmp/snow_map.js
           node --check /tmp/snow_gallery_editor.js
+          node --check /tmp/snow_gallery_mosaic.js

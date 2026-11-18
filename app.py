@@ -1105,6 +1105,64 @@ if tab_gallery.open:
     with tab_gallery:
         render_gallery_tab()
 
+@st.fragment(run_every=2.0)
+def watch_gallery_uploads() -> None:
+    """Poll asynchronous Supabase uploads without rerunning the entire map."""
+    pending = st.session_state["gallery_upload_jobs"]
+    errors = st.session_state["gallery_upload_errors"]
+    completed = False
+    if pending:
+        for ident, future in list(pending.items()):
+            if not future.done():
+                continue
+            pending.pop(ident, None)
+            try:
+                storage_key, seconds = future.result()
+                match = next(
+                    (item for item in st.session_state["gallery"]
+                     if item["id"] == ident), None
+                )
+                if match is None:
+                    # Uploaded photo was deleted while in flight; avoid returning
+                    # its private object path as a live gallery attachment.
+                    if gallery_store:
+                        try:
+                            gallery_store.remove(storage_key)
+                        except SessionStorageError:
+                            pass
+                else:
+                    match["storage_key"] = storage_key
+                    st.session_state["gallery_upload_timings"][ident] = round(seconds, 2)
+                    errors.pop(ident, None)
+                completed = True
+            except Exception as exc:
+                errors[ident] = str(exc)
+                completed = True
+    if completed:
+        # Let the normal, top-level autosave commit only successfully uploaded
+        # images. The in-memory photo remains available if an upload fails.
+        st.session_state.pop("last_saved_digest", None)
+        st.rerun()
+    if pending:
+        st.caption(
+            f"⏳ Сохраняю в Supabase: {len(pending)} фото. "
+            "Не закрывайте вкладку, пока загрузка не завершена."
+        )
+    elif errors:
+        st.warning(
+            f"Не удалось загрузить {len(errors)} фото. "
+            "Используйте «Повторить загрузку» в боковой панели."
+        )
+    elif st.session_state.get("gallery_upload_timings"):
+        seconds = list(st.session_state["gallery_upload_timings"].values())
+        st.caption(
+            f"✓ Фото в Supabase. Последняя загрузка: {seconds[-1]:.1f} с."
+        )
+
+
+if st.session_state.get("gallery_upload_jobs") or st.session_state.get("gallery_upload_errors"):
+    watch_gallery_uploads()
+
 # Autosave if the state has actually changed. No credentials or tile URLs
 # are included in the stored payload.
 token = st.session_state.get("active_token")
@@ -1116,11 +1174,10 @@ if store and token:
         ).hexdigest()
         if snapshot_digest != st.session_state.get("last_saved_digest"):
             if any(not image.get("storage_key") for image in st.session_state["gallery"]):
-                st.warning(
-                    "Некоторые фотографии галереи пока только в памяти. "
-                    "Выполните supabase_gallery_setup.sql и повторите загрузку; "
-                    "пока вся сессия не будет записана в Supabase."
-                )
+                # Preserve the old valid version of the session until all
+                # referenced photos are safely persisted. Non-photo edits
+                # will be saved once outstanding uploads have completed.
+                pass
             else:
                 store.save(token, snapshot)
                 st.session_state["last_saved_digest"] = snapshot_digest

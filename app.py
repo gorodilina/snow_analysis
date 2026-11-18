@@ -113,6 +113,7 @@ def apply_research_payload(payload: dict):
     st.session_state["gallery_export_bytes"] = None
     st.session_state["gallery_upload_jobs"] = {}
     st.session_state["gallery_upload_errors"] = {}
+    st.session_state["gallery_upload_timings"] = {}
     st.session_state["pending_photo"] = None
     st.session_state["gallery_active_id"] = None
     st.session_state["gallery_page"] = 1
@@ -216,6 +217,7 @@ st.session_state.setdefault("gallery_blobs", {})
 st.session_state.setdefault("gallery_export_bytes", None)
 st.session_state.setdefault("gallery_upload_jobs", {})
 st.session_state.setdefault("gallery_upload_errors", {})
+st.session_state.setdefault("gallery_upload_timings", {})
 st.session_state.setdefault("pending_photo", None)
 st.session_state.setdefault("gallery_active_id", None)
 st.session_state.setdefault("gallery_page", 1)
@@ -342,6 +344,50 @@ def render_pending_photo_form() -> None:
             st.rerun()
 
 
+def render_gallery_export(items: list[dict]) -> None:
+    """Keep ZIP/PDF export prominently visible at the top of Gallery."""
+    with st.container(border=True):
+        st.markdown("#### Выгрузка галереи")
+        st.caption(
+            "ZIP — все фотографии в заданном порядке, с их названиями. "
+            "PDF — сначала общие заметки, затем фотографии с подписями."
+        )
+        export_mode = st.radio(
+            "Формат выгрузки",
+            ["ZIP — фотографии", "PDF — фотографии и заметки"],
+            key="gallery_export_mode",
+            horizontal=True,
+        )
+        is_zip = export_mode.startswith("ZIP")
+        if st.button("Подготовить " + ("ZIP" if is_zip else "PDF"),
+                     key="export_gallery_prepare", use_container_width=True):
+            try:
+                with st.spinner("Готовлю архив галереи..." if is_zip else "Готовлю PDF..."):
+                    pictures = collect_gallery_images(composite=True)
+                    if is_zip:
+                        output = build_gallery_zip(items, pictures)
+                        ext, mime = "zip", "application/zip"
+                    else:
+                        output = build_gallery_pdf(
+                            items, pictures,
+                            st.session_state["research_name"],
+                            project_notes=st.session_state.get("research_note", ""),
+                        )
+                        ext, mime = "pdf", "application/pdf"
+                    st.session_state["gallery_export_bytes"] = (ext, mime, output)
+            except (SessionStorageError, OSError, ValueError) as exc:
+                st.error(f"Не удалось подготовить выгрузку: {exc}")
+        prepared = st.session_state.get("gallery_export_bytes")
+        if prepared and (prepared[0] == "zip") == is_zip:
+            st.download_button(
+                "Скачать галерею ." + prepared[0].upper(),
+                data=prepared[2],
+                file_name="snow-gallery." + prepared[0],
+                mime=prepared[1],
+                use_container_width=True,
+            )
+
+
 def render_gallery_tab() -> None:
     """Independent, paged thumbnail gallery with explicit per-photo editor."""
     items = st.session_state["gallery"]
@@ -357,6 +403,9 @@ def render_gallery_tab() -> None:
     if not items:
         st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
         return
+
+    # Export is always visible ABOVE the mosaic/editor, not buried below photos.
+    render_gallery_export(items)
 
     ids = {item["id"] for item in items}
     if st.session_state.get("gallery_active_id") not in ids:
@@ -472,35 +521,6 @@ def render_gallery_tab() -> None:
             except SessionStorageError as exc:
                 st.error(f"Не удалось удалить изображение: {exc}")
 
-    st.divider()
-    st.subheader("Выгрузить галерею")
-    export_mode = st.radio(
-        "Формат", ["ZIP — только PNG/JPG", "PDF — изображения и заметки"],
-        key="gallery_export_mode", horizontal=True,
-    )
-    if st.button("Подготовить выгрузку", key="export_gallery_prepare"):
-        try:
-            pictures = collect_gallery_images(composite=True)
-            if export_mode.startswith("ZIP"):
-                output = build_gallery_zip(items, pictures)
-                ext, mime = "zip", "application/zip"
-            else:
-                output = build_gallery_pdf(
-                    items, pictures, st.session_state["research_name"],
-                    project_notes=st.session_state.get("research_note", ""),
-                )
-                ext, mime = "pdf", "application/pdf"
-            st.session_state["gallery_export_bytes"] = (ext, mime, output)
-        except (SessionStorageError, OSError, ValueError) as exc:
-            st.error(f"Не удалось подготовить выгрузку: {exc}")
-    prepared = st.session_state.get("gallery_export_bytes")
-    if prepared and (prepared[0] == "zip") == export_mode.startswith("ZIP"):
-        st.download_button(
-            "Скачать галерею ." + prepared[0].upper(),
-            data=prepared[2],
-            file_name="snow-gallery." + prepared[0],
-            mime=prepared[1], use_container_width=True,
-        )
 
 
 with st.sidebar:

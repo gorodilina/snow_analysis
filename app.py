@@ -309,6 +309,7 @@ def render_pending_photo_form() -> None:
         if timing:
             st.caption(
                 f"Размер: {timing.get('bytes', 0)/1024/1024:.1f} МБ · "
+                f"захват в браузере: {timing.get('browser_ms', 0)/1000:.1f} с · "
                 f"проверка файла: {timing.get('validation_ms', 0)} мс"
             )
         with st.form("new_gallery_photo_" + item["id"]):
@@ -1055,6 +1056,7 @@ if tab_map.open:
                     blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
                     st.session_state["capture_diagnostics"] = {
                         "bytes": len(blob),
+                        "browser_ms": int(map_event.get("capture_ms") or 0),
                         "validation_ms": round((perf_counter() - validation_start) * 1000),
                     }
                     item = new_gallery_item(bounds, fmt)

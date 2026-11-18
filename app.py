@@ -283,6 +283,8 @@ def render_pending_photo_form() -> None:
                     )
             st.session_state["gallery_blobs"][item["id"]] = pending["data"]
             st.session_state["gallery"].append(item)
+            if not st.session_state.get("gallery_custom_order", False):
+                st.session_state["gallery"] = sorted_gallery(st.session_state["gallery"])
             st.session_state["gallery_active_id"] = item["id"]
             st.session_state["pending_photo"] = None
             st.session_state["gallery_export_bytes"] = None
@@ -309,31 +311,50 @@ def render_gallery_tab() -> None:
     if st.session_state.get("gallery_active_id") not in ids:
         st.session_state["gallery_active_id"] = items[-1]["id"]
 
-    per_page = 9
-    page_count = (len(items) + per_page - 1) // per_page
-    if page_count > 1:
-        if not 1 <= st.session_state.get("gallery_page", 1) <= page_count:
-            st.session_state["gallery_page"] = page_count
-        page = st.number_input(
-            "Страница галереи", min_value=1, max_value=page_count,
-            step=1, key="gallery_page",
-        )
-    else:
-        page = 1
-    visible_items = items[(page - 1) * per_page : page * per_page]
-    for offset in range(0, len(visible_items), 3):
-        columns = st.columns(3)
-        for column, item in zip(columns, visible_items[offset:offset + 3]):
-            with column:
-                try:
-                    st.image(render_annotations(gallery_image_bytes(item), item), use_container_width=True)
-                except SessionStorageError as exc:
-                    st.warning(str(exc))
-                st.caption(item.get("title") or "Без названия")
-                if st.button("Открыть / редактировать", key="open_gallery_" + item["id"],
-                             use_container_width=True):
-                    st.session_state["gallery_active_id"] = item["id"]
-                    st.rerun()
+    cards = []
+    for item in items:
+        try:
+            source = gallery_image_bytes(item)
+            annotations = json.dumps(item.get("annotations", []), sort_keys=True)
+            thumbnail = thumbnail_data(source, item["format"], annotations)
+        except (SessionStorageError, OSError, ValueError) as exc:
+            st.warning(f"Миниатюра «{item.get('title', '')}» недоступна: {exc}")
+            thumbnail = ""
+        cards.append({
+            "id": item["id"],
+            "title": item.get("title", ""),
+            "source_date": item.get("source_date", ""),
+            "thumbnail": thumbnail,
+        })
+    mosaic_event = gallery_mosaic(cards)
+    if isinstance(mosaic_event, dict) and (
+        mosaic_event.get("event_id") != st.session_state.get("processed_mosaic_event")
+    ):
+        action = mosaic_event.get("action")
+        if action == "select" and mosaic_event.get("image_id") in ids:
+            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+            st.session_state["gallery_active_id"] = mosaic_event["image_id"]
+            st.rerun()
+        elif action == "reorder":
+            new_ids = mosaic_event.get("ids") or []
+            if (
+                isinstance(new_ids, list) and len(new_ids) == len(items)
+                and set(new_ids) == ids
+            ):
+                st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+                by_id = {item["id"]: item for item in items}
+                st.session_state["gallery"] = [by_id[ident] for ident in new_ids]
+                st.session_state["gallery_custom_order"] = True
+                st.session_state["gallery_export_bytes"] = None
+                st.rerun()
+            else:
+                st.warning("Некорректный порядок галереи. Изменения не применены.")
+    if st.session_state.get("gallery_custom_order"):
+        if st.button("Вернуть порядок по дате снимков", use_container_width=False):
+            st.session_state["gallery_custom_order"] = False
+            st.session_state["gallery"] = sorted_gallery(items)
+            st.session_state["gallery_export_bytes"] = None
+            st.rerun()
 
     active_id = st.session_state["gallery_active_id"]
     active = next((item for item in items if item["id"] == active_id), items[-1])
@@ -945,10 +966,22 @@ with tab_map:
                     fmt = map_event.get("image_format", "png")
                     blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
                     item = new_gallery_item(bounds, fmt)
-                    item["title"] = suggested_gallery_title(
-                        st.session_state["image_layers"],
+                    capture_state = (
                         incoming_state if isinstance(incoming_state, dict)
-                        else st.session_state["map_state"],
+                        else st.session_state["map_state"]
+                    )
+                    visible_layers = [
+                        layer for layer in st.session_state["image_layers"]
+                        if capture_state.get("overlays", {}).get(
+                            layer["id"], {}
+                        ).get("visible", True)
+                    ]
+                    if visible_layers:
+                        source = visible_layers[-1]
+                        item["source_layer_id"] = source["id"]
+                        item["source_date"] = source.get("day", source.get("start", ""))
+                    item["title"] = suggested_gallery_title(
+                        st.session_state["image_layers"], capture_state
                     )
                     # Keep the image in a draft until the title/note form is confirmed.
                     # Every new screenshot gets its own random gallery ID.

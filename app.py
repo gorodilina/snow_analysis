@@ -24,18 +24,17 @@ from project_layers import (
     migrate_legacy_selection, new_median_layer, new_scene_layer, normalize_layers,
     contour_flags,
 )
-from project_archive import (
-    build_project_zip, import_project_zip, safe_export_filename,
-)
 from gallery import (
     GalleryStorage, build_gallery_zip, build_gallery_pdf, new_gallery_item,
-    normalize_gallery, normalize_annotations, read_snapshot, render_annotations,
-    suggested_gallery_title, photo_layer_date, sorted_gallery, validate_bounds,
+    normalize_gallery, normalize_annotations, read_snapshot, read_user_image,
+    render_annotations, suggested_gallery_title, photo_layer_date, sorted_gallery,
+    validate_bounds,
 )
 from gallery_mosaic import gallery_mosaic, thumbnail_data
 from gallery_uploads import submit_gallery_upload
 from gallery_editor import edit_gallery_image
-from geo_export import export_geotiff, suggested_scale
+from geo_export import export_geotiff, suggested_scale, geotiff_filename
+from project_delete import delete_project
 from session_store import SessionStorageError, SessionStore, valid_token
 
 ROOT = Path(__file__).resolve().parent
@@ -118,6 +117,7 @@ def apply_research_payload(payload: dict):
     st.session_state["gallery_active_id"] = None
     st.session_state["gallery_page"] = 1
     st.session_state["geotiff_bytes"] = None
+    st.session_state["gallery_uploader_revision"] = st.session_state.get("gallery_uploader_revision", 0) + 1
     st.session_state["manual_points"] = []
     # Rotate the uploader key instead of writing into a non-settable file widget.
     st.session_state["geo_uploader_revision"] = st.session_state.get("geo_uploader_revision", 0) + 1
@@ -221,6 +221,7 @@ st.session_state.setdefault("gallery_upload_timings", {})
 st.session_state.setdefault("pending_photo", None)
 st.session_state.setdefault("gallery_active_id", None)
 st.session_state.setdefault("gallery_page", 1)
+st.session_state.setdefault("gallery_uploader_revision", 0)
 st.session_state.setdefault("geotiff_bytes", None)
 st.session_state.setdefault("map_state", {})
 st.session_state.setdefault("image_layers", [])
@@ -234,7 +235,7 @@ def gallery_image_bytes(item: dict) -> bytes:
     if local is not None:
         return local
     if not item.get("storage_key") or not gallery_store:
-        raise SessionStorageError("Изображение недоступно. Восстановите проект из ZIP.")
+        raise SessionStorageError("Изображение не найдено в галерее. Проверьте облачное сохранение.")
     data = gallery_store.get(item["storage_key"])
     st.session_state["gallery_blobs"][ident] = data
     return data
@@ -528,23 +529,6 @@ with st.sidebar:
     st.title("🏔️ Анализ снежной обстановки")
     st.caption("Спутниковые снимки, граница снега и изотермы вдоль трека")
     st.subheader("1. Трек и точки")
-    # Import must run before widget keys are instantiated, so the restored
-    # satellite/date controls can be populated without Streamlit errors.
-    with st.expander("Восстановить проект из ZIP"):
-        archive_input = st.file_uploader(
-            "Архив исследования", type=["zip"], key="project_zip"
-        )
-        if st.button("Загрузить проект из ZIP", disabled=archive_input is None,
-                     use_container_width=True):
-            try:
-                apply_research_payload(import_project_zip(archive_input.getvalue()))
-                st.session_state.pop("active_token", None)
-                st.session_state.pop("last_saved_digest", None)
-                st.session_state["loaded_map_revision"] = "imported"
-                st.query_params.clear()
-                st.rerun()
-            except (SessionStorageError, ValueError, KeyError, TypeError) as exc:
-                st.error(f"Ошибка импорта проекта: {exc}")
     uploads = st.file_uploader(
         "Загрузить файлы KML или GPX",
         type=["kml", "gpx", "csv"],
@@ -907,6 +891,7 @@ with st.sidebar:
     available_areas += [
         (item["id"], f"Галерея: {item['title'] or str(i+1)}", item["bounds"])
         for i, item in enumerate(gallery_items)
+        if item.get("bounds") is not None
     ]
     if available_areas and st.session_state["image_layers"]:
         area_choice = st.selectbox(
@@ -937,8 +922,8 @@ with st.sidebar:
                     st.session_state["geotiff_bytes"] = export_geotiff(
                         source_spec, available_areas[area_choice][2], int(scale)
                     )
-                    st.session_state["geotiff_name"] = (
-                        source_spec["id"] + "_" + str(scale) + "m.tif"
+                    st.session_state["geotiff_name"] = geotiff_filename(
+                        source_spec, available_areas[area_choice][2], int(scale)
                     )
                 except Exception as exc:
                     st.error(f"Не удалось создать GeoTIFF: {exc}")

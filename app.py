@@ -4,10 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import io
+from time import perf_counter
 from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
+from PIL import Image as PILImage
 
 from gee_client import (
     LANDSAT, SENTINEL, initialize_ee, list_month_scenes,
@@ -30,6 +33,7 @@ from gallery import (
     suggested_gallery_title, photo_layer_date, sorted_gallery, validate_bounds,
 )
 from gallery_mosaic import gallery_mosaic, thumbnail_data
+from gallery_uploads import submit_gallery_upload
 from gallery_editor import edit_gallery_image
 from geo_export import export_geotiff, suggested_scale
 from session_store import SessionStorageError, SessionStore, valid_token
@@ -107,6 +111,8 @@ def apply_research_payload(payload: dict):
     )
     st.session_state["gallery_blobs"] = payload.get("_gallery_media") or {}
     st.session_state["gallery_export_bytes"] = None
+    st.session_state["gallery_upload_jobs"] = {}
+    st.session_state["gallery_upload_errors"] = {}
     st.session_state["pending_photo"] = None
     st.session_state["gallery_active_id"] = None
     st.session_state["gallery_page"] = 1
@@ -208,6 +214,8 @@ st.session_state.setdefault("gallery_custom_order", False)
 st.session_state.setdefault("gallery", [])
 st.session_state.setdefault("gallery_blobs", {})
 st.session_state.setdefault("gallery_export_bytes", None)
+st.session_state.setdefault("gallery_upload_jobs", {})
+st.session_state.setdefault("gallery_upload_errors", {})
 st.session_state.setdefault("pending_photo", None)
 st.session_state.setdefault("gallery_active_id", None)
 st.session_state.setdefault("gallery_page", 1)
@@ -253,6 +261,38 @@ def sync_gallery_to_cloud(token: str) -> None:
         item["storage_key"] = gallery_store.put(token, item, blob)
 
 
+@st.cache_data(show_spinner=False, max_entries=96)
+def quick_photo_preview(photo: bytes) -> bytes:
+    """Send a small preview to Streamlit; keep original full-res data elsewhere."""
+    with PILImage.open(io.BytesIO(photo)) as image:
+        image.thumbnail((900, 700), PILImage.Resampling.LANCZOS)
+        preview = image.convert("RGB")
+        out = io.BytesIO()
+        preview.save(out, format="JPEG", quality=79)
+    return out.getvalue()
+
+
+def queue_gallery_uploads(token: str) -> None:
+    """Schedule missing photos; do not block the Streamlit render thread."""
+    if not gallery_store or not token:
+        return
+    jobs = st.session_state["gallery_upload_jobs"]
+    errors = st.session_state["gallery_upload_errors"]
+    for item in st.session_state["gallery"]:
+        ident = item["id"]
+        if item.get("storage_key") or ident in jobs:
+            continue
+        blob = st.session_state["gallery_blobs"].get(ident)
+        if blob is None:
+            errors[ident] = "Исходное изображение не найдено в памяти."
+            continue
+        try:
+            jobs[ident] = submit_gallery_upload(gallery_store, token, item, blob)
+            errors.pop(ident, None)
+        except RuntimeError as exc:
+            errors[ident] = "Не удалось запустить загрузку: " + str(exc)
+
+
 def render_pending_photo_form() -> None:
     """Stage the screenshot first; let the user rename/comment BEFORE upload."""
     pending = st.session_state.get("pending_photo")
@@ -262,7 +302,7 @@ def render_pending_photo_form() -> None:
     with st.container(border=True):
         st.subheader("Новый снимок карты — добавление в галерею")
         st.caption("Название уже заполнено по спутниковому слою. Можно изменить его и добавить заметку.")
-        st.image(pending["data"], width=380)
+        st.image(quick_photo_preview(pending["data"]), width=380)
         with st.form("new_gallery_photo_" + item["id"]):
             title = st.text_input("Название", value=item["title"], max_chars=150)
             note = st.text_area("Заметка (необязательно)", value="", max_chars=3000, height=90)
@@ -274,21 +314,22 @@ def render_pending_photo_form() -> None:
             item["title"] = title.strip() or item["title"]
             item["note"] = note.strip()
             token = st.session_state.get("active_token")
-            if token and gallery_store:
-                try:
-                    item["storage_key"] = gallery_store.put(token, item, pending["data"])
-                except SessionStorageError as exc:
-                    st.warning(
-                        f"Изображение пока хранится только в текущей сессии: {exc}"
-                    )
+            # Append immediately; a network upload must never block the UI.
             st.session_state["gallery_blobs"][item["id"]] = pending["data"]
             st.session_state["gallery"].append(item)
+            if token:
+                queue_gallery_uploads(token)
             if not st.session_state.get("gallery_custom_order", False):
                 st.session_state["gallery"] = sorted_gallery(st.session_state["gallery"])
             st.session_state["gallery_active_id"] = item["id"]
             st.session_state["pending_photo"] = None
             st.session_state["gallery_export_bytes"] = None
             st.session_state["project_backup_bytes"] = None
+            st.toast(
+                "Фото добавлено в галерею. " +
+                ("Загрузка в облако продолжается…" if token
+                 else "Для постоянной ссылки сохраните исследование.")
+            )
             st.rerun()
         if st.button("Отменить этот снимок", key="cancel_pending_photo"):
             st.session_state["pending_photo"] = None
@@ -303,6 +344,10 @@ def render_gallery_tab() -> None:
         f"Сохранено изображений: {len(items)}. "
         "Выбери фотографию, чтобы отредактировать название и заметку."
     )
+    if st.session_state.get("gallery_upload_jobs"):
+        st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
+    if st.session_state.get("gallery_upload_errors"):
+        st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
     if not items:
         st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
         return

@@ -987,7 +987,10 @@ with tab_map:
                     # Every new screenshot gets its own random gallery ID.
                     st.session_state["pending_photo"] = {"item": item, "data": blob}
                     st.session_state["map_state"]["selection_bounds"] = bounds
-                    st.rerun()
+                    # The component event already caused this Streamlit run.
+                    # The pending-photo form is rendered below, in the same run.
+                    # A second st.rerun() here used to make the first click seem lost.
+                    st.toast("Снимок готов — добавь название или заметку и сохрани.")
             except (SessionStorageError, ValueError, TypeError) as exc:
                 st.error(f"Не удалось подготовить снимок для галереи: {exc}")
         elif changed_analysis:

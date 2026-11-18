@@ -303,6 +303,12 @@ def render_pending_photo_form() -> None:
         st.subheader("Новый снимок карты — добавление в галерею")
         st.caption("Название уже заполнено по спутниковому слою. Можно изменить его и добавить заметку.")
         st.image(quick_photo_preview(pending["data"]), width=380)
+        timing = st.session_state.get("capture_diagnostics", {})
+        if timing:
+            st.caption(
+                f"Размер: {timing.get('bytes', 0)/1024/1024:.1f} МБ · "
+                f"проверка файла: {timing.get('validation_ms', 0)} мс"
+            )
         with st.form("new_gallery_photo_" + item["id"]):
             title = st.text_input("Название", value=item["title"], max_chars=150)
             note = st.text_area("Заметка (необязательно)", value="", max_chars=3000, height=90)
@@ -825,13 +831,19 @@ with st.sidebar:
     elif current_token:
         st.caption("Автосохранение включено. Владелец ссылки может редактировать исследование.")
         st.code(share_link(current_token), language=None)
-        if any(not p.get("storage_key") for p in gallery_items):
-            if st.button("Повторить загрузку изображений в Supabase", use_container_width=True):
-                try:
-                    sync_gallery_to_cloud(current_token)
-                    st.rerun()
-                except SessionStorageError as exc:
-                    st.error(f"Не удалось сохранить галерею: {exc}")
+        incomplete = [p for p in gallery_items if not p.get("storage_key")]
+        if incomplete:
+            st.caption(
+                f"Ожидают облачного сохранения: {len(incomplete)}. "
+                "Не закрывайте вкладку до завершения."
+            )
+            if st.button(
+                "Повторить загрузку изображений в Supabase",
+                use_container_width=True,
+                disabled=bool(st.session_state["gallery_upload_jobs"]),
+            ):
+                queue_gallery_uploads(current_token)
+                st.rerun()
         try:
             st.link_button(
                 "Создать другое исследование",
@@ -841,18 +853,26 @@ with st.sidebar:
             st.caption("Откройте адрес приложения без ?session=… для нового исследования.")
     elif st.button("Сохранить и получить ссылку", type="primary", use_container_width=True):
         try:
-            token = store.create(research_payload(routes, points))
+            # Do not expose an incomplete photo in the public study before
+            # the corresponding file is safely written to private Storage.
+            initial = research_payload(routes, points)
+            initial["gallery"] = [
+                p for p in initial["gallery"] if p.get("storage_key")
+            ]
+            token = store.create(initial)
             st.session_state["active_token"] = token
             st.session_state["loaded_map_revision"] = token
-            if gallery_items:
-                sync_gallery_to_cloud(token)
-            final_payload = research_payload(routes, points)
-            store.save(token, final_payload)
             st.session_state["last_saved_digest"] = hashlib.sha256(
-                json.dumps(final_payload, ensure_ascii=False, sort_keys=True).encode()
+                json.dumps(initial, ensure_ascii=False, sort_keys=True).encode()
             ).hexdigest()
+            if gallery_items:
+                queue_gallery_uploads(token)
             st.query_params["session"] = token
-            st.success("Ссылка создана. Фото галереи сохранены в приватном хранилище.")
+            st.success(
+                "Ссылка создана. " +
+                ("Снимки галереи загружаются в облако — не закрывайте вкладку."
+                 if gallery_items else "Исследование сохранено.")
+            )
             st.code(share_link(token), language=None)
         except (SessionStorageError, ValueError) as exc:
             st.error(f"Не удалось полностью сохранить исследование: {exc}")
@@ -1011,7 +1031,12 @@ if tab_map.open:
                 else:
                     bounds = validate_bounds(map_event.get("bounds"))
                     fmt = map_event.get("image_format", "png")
+                    validation_start = perf_counter()
                     blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
+                    st.session_state["capture_diagnostics"] = {
+                        "bytes": len(blob),
+                        "validation_ms": round((perf_counter() - validation_start) * 1000),
+                    }
                     item = new_gallery_item(bounds, fmt)
                     capture_state = (
                         incoming_state if isinstance(incoming_state, dict)

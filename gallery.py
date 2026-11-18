@@ -16,12 +16,14 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 import requests
-from PIL import Image as PILImage, UnidentifiedImageError
+from PIL import Image as PILImage, ImageDraw, ImageFont, UnidentifiedImageError
 
 from session_store import SessionStorageError, valid_token
 
-MAX_IMAGE_BYTES = 2_000_000
-MAX_PIXELS = 3_500_000
+MAX_IMAGE_BYTES = 8_000_000
+MAX_PIXELS = 10_000_000
+MAX_ANNOTATIONS = 150
+MAX_STROKE_POINTS = 350
 IMAGE_ID_RE = re.compile(r"^gal_[0-9a-f]{20}$")
 STORAGE_PATH_RE = re.compile(r"^[A-Za-z0-9_-]{32,90}/gal_[0-9a-f]{20}\.(?:png|jpg)$")
 FORMATS = {"png": "image/png", "jpg": "image/jpeg"}
@@ -41,7 +43,7 @@ def validate_bounds(bounds: list) -> list[float]:
 
 def read_snapshot(data_url: str, requested: str = "png") -> tuple[bytes, str]:
     """Decode and re-encode an untrusted browser screenshot with strict limits."""
-    if not isinstance(data_url, str) or len(data_url) > MAX_IMAGE_BYTES * 3:
+    if not isinstance(data_url, str) or len(data_url) > (MAX_IMAGE_BYTES * 4 // 3 + 4096):
         raise SessionStorageError("Изображение слишком большое.")
     if requested not in FORMATS:
         raise SessionStorageError("Поддерживаются PNG и JPG.")
@@ -51,7 +53,7 @@ def read_snapshot(data_url: str, requested: str = "png") -> tuple[bytes, str]:
     try:
         raw = base64.b64decode(match.group(1), validate=True)
         if len(raw) > MAX_IMAGE_BYTES:
-            raise SessionStorageError("Снимок превышает 2 МБ.")
+            raise SessionStorageError("Снимок превышает 8 МБ.")
         with PILImage.open(io.BytesIO(raw)) as original:
             if original.format not in ("PNG", "JPEG"):
                 raise SessionStorageError("Неизвестный формат изображения.")
@@ -60,15 +62,122 @@ def read_snapshot(data_url: str, requested: str = "png") -> tuple[bytes, str]:
             image = original.convert("RGB" if requested == "jpg" else "RGBA")
             output = io.BytesIO()
             if requested == "jpg":
-                image.save(output, format="JPEG", quality=86, optimize=True)
+                image.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
             else:
                 image.save(output, format="PNG", optimize=True)
         data = output.getvalue()
         if len(data) > MAX_IMAGE_BYTES:
-            raise SessionStorageError("Снимок превышает 2 МБ после обработки.")
+            raise SessionStorageError("Снимок превышает 8 МБ после обработки. Выберите JPG.")
         return data, requested
     except (ValueError, OSError, UnidentifiedImageError) as exc:
         raise SessionStorageError("Не удалось прочитать снимок карты.") from exc
+
+
+def normalize_annotations(annotations: list | None) -> list[dict]:
+    """Validate normalized vector annotations; raw image bytes stay untouched."""
+    if annotations is None:
+        return []
+    if not isinstance(annotations, list) or len(annotations) > MAX_ANNOTATIONS:
+        raise SessionStorageError("Слишком много пометок на изображении.")
+    cleaned = []
+    for entry in annotations:
+        if not isinstance(entry, dict) or entry.get("type") not in ("pen", "arrow", "text"):
+            raise SessionStorageError("Неизвестный инструмент пометки.")
+        kind = entry["type"]
+        points = entry.get("points")
+        if not isinstance(points, list) or not 1 <= len(points) <= MAX_STROKE_POINTS:
+            raise SessionStorageError("Слишком длинная линия.")
+        if kind == "arrow" and len(points) != 2:
+            raise SessionStorageError("Стрелка должна иметь две точки.")
+        if kind == "text" and len(points) != 1:
+            raise SessionStorageError("Подпись должна иметь одну точку.")
+        normalized_points = []
+        for pair in points:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                raise SessionStorageError("Некорректные координаты пометки.")
+            try:
+                x, y = float(pair[0]), float(pair[1])
+            except (TypeError, ValueError) as exc:
+                raise SessionStorageError("Некорректные координаты пометки.") from exc
+            if not (0 <= x <= 1 and 0 <= y <= 1):
+                raise SessionStorageError("Пометка находится за пределами изображения.")
+            normalized_points.append([round(x, 5), round(y, 5)])
+        color = str(entry.get("color", "#f0004b")).lower()
+        if not re.fullmatch(r"#[0-9a-f]{6}", color):
+            raise SessionStorageError("Неверный цвет пометки.")
+        try:
+            width = float(entry.get("width", 0.005))
+        except (TypeError, ValueError) as exc:
+            raise SessionStorageError("Некорректная толщина линии.") from exc
+        if not 0.001 <= width <= 0.04:
+            raise SessionStorageError("Толщина линии вне допустимого диапазона.")
+        result = {
+            "type": kind, "points": normalized_points,
+            "color": color, "width": round(width, 5),
+        }
+        if kind == "text":
+            label = str(entry.get("text", "")).strip()
+            if not label or len(label) > 100:
+                raise SessionStorageError("Подпись должна быть от 1 до 100 символов.")
+            result["text"] = label
+        cleaned.append(result)
+    return cleaned
+
+
+def _annotation_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+    ):
+        if Path(path).is_file():
+            return ImageFont.truetype(path, size=size)
+    return ImageFont.load_default()
+
+
+def render_annotations(image_bytes: bytes, item: dict) -> bytes:
+    """Non-destructively flatten saved vector strokes for previews and exports."""
+    strokes = normalize_annotations(item.get("annotations", []))
+    if not strokes:
+        return image_bytes
+    with PILImage.open(io.BytesIO(image_bytes)) as original:
+        image = original.convert("RGB" if item["format"] == "jpg" else "RGBA")
+    width, height = image.size
+    measure = min(width, height)
+    draw = ImageDraw.Draw(image)
+    from math import atan2, cos, sin, pi
+    for stroke in strokes:
+        points = [(round(x * width), round(y * height)) for x, y in stroke["points"]]
+        color = stroke["color"]
+        thick = max(1, round(measure * stroke["width"]))
+        if stroke["type"] == "pen":
+            if len(points) == 1:
+                x, y = points[0]
+                draw.ellipse((x - thick, y - thick, x + thick, y + thick), fill=color)
+            else:
+                draw.line(points, fill=color, width=thick, joint="curve")
+        elif stroke["type"] == "arrow":
+            start, end = points
+            draw.line((start, end), fill=color, width=thick)
+            angle = atan2(end[1] - start[1], end[0] - start[0])
+            radius = max(9, thick * 5)
+            wings = [
+                (round(end[0] - radius * cos(angle - offset)),
+                 round(end[1] - radius * sin(angle - offset)))
+                for offset in (pi / 6, -pi / 6)
+            ]
+            draw.polygon((end, wings[0], wings[1]), fill=color)
+        else:
+            font = _annotation_font(max(12, thick * 5))
+            draw.text(points[0], stroke["text"], fill=color, font=font, stroke_width=1)
+    output = io.BytesIO()
+    if item["format"] == "jpg":
+        image.save(output, "JPEG", quality=95, subsampling=0, optimize=True)
+    else:
+        image.save(output, "PNG", optimize=True)
+    if output.tell() > MAX_IMAGE_BYTES:
+        raise SessionStorageError("Изображение с пометками превышает 8 МБ. Попробуйте JPG.")
+    return output.getvalue()
 
 
 def normalize_gallery(items: list) -> list[dict]:
@@ -99,6 +208,7 @@ def normalize_gallery(items: list) -> list[dict]:
             "bounds": validate_bounds(item.get("bounds")),
             "storage_key": key,
             "captured_at": str(item.get("captured_at") or "")[:40],
+            "annotations": normalize_annotations(item.get("annotations", [])),
         })
     return out
 
@@ -132,6 +242,7 @@ def new_gallery_item(bounds: list, fmt: str = "png") -> dict:
         "bounds": validate_bounds(bounds),
         "storage_key": None,
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "annotations": [],
     }
 
 
@@ -186,15 +297,37 @@ class GalleryStorage:
         self._call("DELETE", self._url(storage_key))
 
 
+def gallery_export_filename(title: str, fmt: str, used: set[str]) -> str:
+    """Unicode-safe names, no traversal; deterministic collision suffixes."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(title or "Снимок"))
+    name = re.sub(r"\s+", " ", name).strip(" ._")
+    if name.upper().split(".")[0] in {
+        "CON", "PRN", "AUX", "NUL", *{f"COM{i}" for i in range(1, 10)},
+        *{f"LPT{i}" for i in range(1, 10)},
+    }:
+        name = "_" + name
+    name = name[:110].rstrip(" .") or "Снимок"
+    candidate = f"{name}.{fmt}"
+    counter = 2
+    while candidate.casefold() in used:
+        suffix = f" ({counter})"
+        candidate = f"{name[:110-len(suffix)]}{suffix}.{fmt}"
+        counter += 1
+    used.add(candidate.casefold())
+    return candidate
+
+
 def build_gallery_zip(items: list[dict], images: dict[str, bytes]) -> bytes:
-    """ZIP contains only selected images, without hidden project/raster files."""
+    """ZIP filenames match gallery captions instead of numeric placeholders."""
     output = io.BytesIO()
+    used: set[str] = set()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for index, item in enumerate(items, 1):
+        for item in items:
             ident = item["id"]
             if ident not in images:
                 raise SessionStorageError(f"Нет изображения {ident} для экспорта.")
-            z.writestr(f"{index:03d}.{item['format']}", images[ident])
+            filename = gallery_export_filename(item.get("title", ""), item["format"], used)
+            z.writestr(filename, images[ident])
     return output.getvalue()
 
 

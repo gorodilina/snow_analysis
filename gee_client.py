@@ -185,34 +185,48 @@ def image_rgb_tile(spec: dict, bbox: list[float]) -> dict:
     }
 
 
-def analysis_overlay_tiles(spec: dict, bbox: list[float]) -> tuple[list[dict], list[str]]:
-    """Snow outline and ERA5 isolines for THIS image, attached to its layer ID."""
-    day = date.fromisoformat(spec["day"] if spec["kind"] == "scene" else spec["start"])
-    masked = image_from_layer(spec, bbox, mask_clouds=True)
+def analysis_overlay_tiles(
+    spec: dict, bbox: list[float], *, include_snow: bool = True,
+    iso_levels: list[int] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Create only requested snow/temperature contours for one image."""
+    day = date.fromisoformat(
+        spec["day"] if spec["kind"] == "scene" else spec["start"]
+    )
     area = _roi(bbox)
-    ndsi = masked.normalizedDifference(["green", "swir"])
-    valid = masked.select("green").mask().And(masked.select("swir").mask())
-    snow = ndsi.gte(0.4).And(masked.select("green").gt(0.1)).toByte().updateMask(valid)
-    edge = (snow.focalMax(1).neq(snow.focalMin(1))
-            .updateMask(valid.focalMin(1)).selfMask().clip(area))
-    result = [{
-        "id": spec["id"] + ":snow",
-        "source_id": spec["id"],
-        "name": "Граница снега · " + spec["name"],
-        "role": "snow",
-        "url": _tile_url(edge, {"palette": ["00ffff"]}),
-        "opacity": 0.95,
-        "visible": False,
-    }]
+    result = []
     warnings = []
-    try:
-        for item in _temperature_layers(bbox, day):
-            item["role"] = "isotherm"
-            item["source_id"] = spec["id"]
-            item["id"] = spec["id"] + ":iso:" + item["name"].split(" ")[1].replace("+", "plus")
-            result.append(item)
-    except Exception as exc:
-        warnings.append(f"Изотермы ERA5-Land недоступны: {exc}")
+    if include_snow:
+        masked = image_from_layer(spec, bbox, mask_clouds=True)
+        ndsi = masked.normalizedDifference(["green", "swir"])
+        valid = masked.select("green").mask().And(masked.select("swir").mask())
+        snow = ndsi.gte(0.4).And(masked.select("green").gt(0.1)).toByte().updateMask(valid)
+        edge = (snow.focalMax(1).neq(snow.focalMin(1))
+                .updateMask(valid.focalMin(1)).selfMask().clip(area))
+        result.append({
+            "id": spec["id"] + ":snow",
+            "source_id": spec["id"],
+            "analysis_key": "snow",
+            "name": "Граница снега · " + spec["name"],
+            "role": "snow",
+            "url": _tile_url(edge, {"palette": ["00ffff"]}),
+            "color": "#00ffff",
+            "opacity": 0.95,
+            "visible": False,
+        })
+    if iso_levels is None:
+        iso_levels = [-5, 0, 5, 10]
+    if iso_levels:
+        try:
+            for item in _temperature_layers(bbox, day, levels=iso_levels):
+                item["role"] = "isotherm"
+                item["source_id"] = spec["id"]
+                level = int(item["level"])
+                item["analysis_key"] = f"iso_{level}"
+                item["id"] = spec["id"] + ":iso:" + str(level)
+                result.append(item)
+        except Exception as exc:
+            warnings.append(f"Изотермы ERA5-Land недоступны: {exc}")
     return result, warnings
 
 
@@ -228,7 +242,9 @@ def _utm_projection(bbox: list[float], scale: int) -> ee.Projection:
     return ee.Projection(f"EPSG:{epsg}").atScale(scale)
 
 
-def _temperature_layers(bbox: list[float], day: date) -> list[dict]:
+def _temperature_layers(
+    bbox: list[float], day: date, levels: list[int] | None = None
+) -> list[dict]:
     daily = ee.ImageCollection("ECMWF/ERA5_LAND/DAILY_AGGR").filterDate(
         day.isoformat(), (day + timedelta(days=1)).isoformat()
     )
@@ -247,12 +263,20 @@ def _temperature_layers(bbox: list[float], day: date) -> list[dict]:
     corrected = (temp.resample("bilinear")
                  .subtract(dem.resample("bilinear").subtract(coarse).multiply(0.006))
                  .reproject(proj90))
+    palette = {-5: "536bd7", 0: "ff3472", 5: "fa9c40", 10: "f6da4f"}
+    if levels is None:
+        levels = list(palette)
     result = []
-    for level, color in [(-5, "536bd7"), (0, "ff3472"), (5, "fa9c40"), (10, "f6da4f")]:
+    for level in levels:
+        if level not in palette:
+            raise ValueError("Неподдерживаемая изотерма")
+        color = palette[level]
         above = corrected.gte(level).toByte()
         line = above.focalMax(1).neq(above.focalMin(1)).selfMask().clip(area)
         result.append({
             "name": f"Изотерма {level:+d} °C",
+            "level": level,
+            "color": "#" + color,
             "url": _tile_url(line, {"palette": [color]}),
             "opacity": 0.9,
             "visible": False,

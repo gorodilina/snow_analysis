@@ -55,8 +55,8 @@ def test_gallery_zip_only_contains_photos():
     item, photo = example()
     data = build_gallery_zip([item], {item["id"]: photo})
     with ZipFile(io.BytesIO(data)) as z:
-        assert z.namelist() == ["001.png"]
-        assert z.read("001.png") == photo
+        assert z.namelist() == [item["title"] + ".png"]
+        assert z.read(item["title"] + ".png") == photo
 
 
 def test_gallery_pdf_russian_caption():

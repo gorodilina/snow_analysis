@@ -33,18 +33,13 @@ def layer_label(spec: dict[str, Any]) -> str:
     if spec.get("kind") == "median":
         start = date.fromisoformat(spec["start"])
         end = start + timedelta(days=int(spec["length"]) - 1)
-        if start.year == end.year and start.month == end.month:
-            window = f"{start:%d}–{end:%d.%m.%y}"
-        elif start.year == end.year:
-            window = f"{start:%d.%m}–{end:%d.%m.%y}"
-        else:
-            window = f"{start:%d.%m.%y}–{end:%d.%m.%y}"
+        window = f"{start:%d.%m.%Y}–{end:%d.%m.%Y}"
         return f"{satellite} · {window} · мед."
     day = date.fromisoformat(spec["day"])
     if spec.get("image_id"):
         time = spec.get("time", "")
-        return f"{satellite} · {day:%d.%m.%y}" + (f" {time}" if time else "")
-    return f"{satellite} · {day:%d.%m.%y} · день"
+        return f"{satellite} · {day:%d.%m.%Y}" + (f" {time}" if time else "")
+    return f"{satellite} · {day:%d.%m.%Y} · день"
 
 
 def new_scene_layer(satellite: str, day: date, image_id: str | None,

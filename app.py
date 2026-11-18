@@ -27,7 +27,7 @@ from project_archive import (
 from gallery import (
     GalleryStorage, build_gallery_zip, build_gallery_pdf, new_gallery_item,
     normalize_gallery, normalize_annotations, read_snapshot, render_annotations,
-    suggested_gallery_title, sorted_gallery, validate_bounds,
+    suggested_gallery_title, photo_layer_date, sorted_gallery, validate_bounds,
 )
 from gallery_mosaic import gallery_mosaic, thumbnail_data
 from gallery_editor import edit_gallery_image
@@ -323,7 +323,7 @@ def render_gallery_tab() -> None:
         cards.append({
             "id": item["id"],
             "title": item.get("title", ""),
-            "source_date": item.get("source_date", ""),
+            "source_date": photo_layer_date(item),
             "thumbnail": thumbnail,
         })
     mosaic_event = gallery_mosaic(cards)

@@ -484,6 +484,28 @@ def gallery_edit_dialog(image_id: str) -> None:
 
 
 
+def accept_gallery_paste(event: dict | None) -> bool:
+    """Handle a single clipboard upload from the gallery iframe."""
+    if not isinstance(event, dict) or event.get("action") != "paste_image":
+        return False
+    eid = event.get("event_id")
+    if not eid or eid == st.session_state.get("processed_mosaic_event"):
+        return False
+    st.session_state["processed_mosaic_event"] = eid
+    try:
+        data_url = event.get("image_data", "")
+        fmt = "jpg" if data_url.startswith("data:image/jpeg;") else "png"
+        raw, _ = read_snapshot(data_url, fmt)
+        item = add_personal_image(
+            raw, event.get("filename") or "Изображение из буфера.png"
+        )
+        st.toast(f"Добавлено в галерею: {item['title']}")
+        st.rerun()
+    except (SessionStorageError, ValueError, TypeError) as exc:
+        st.error(f"Не удалось вставить изображение: {exc}")
+    return True
+
+
 def render_gallery_tab() -> None:
     """Independent, paged thumbnail gallery with explicit per-photo editor."""
     items = st.session_state["gallery"]
@@ -496,8 +518,39 @@ def render_gallery_tab() -> None:
         st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
     if st.session_state.get("gallery_upload_errors"):
         st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
+    with st.container(border=True):
+        st.markdown("#### Добавить свои изображения")
+        st.caption(
+            "Можно выбрать PNG/JPG с устройства или вставить изображение из "
+            "буфера обмена (Ctrl+V в области вставки под этим блоком). "
+            "Для больших картографических скриншотов сохранение может "
+            "занимать заметное время; быстрее сделать обычный скриншот "
+            "и загрузить его сюда. Лимит: 8 МБ / 10 Мп на файл."
+        )
+        user_files = st.file_uploader(
+            "Выбрать PNG/JPG",
+            type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key=f"user_gallery_files_{st.session_state['gallery_uploader_revision']}",
+        )
+        if user_files:
+            imported = 0
+            for uploaded in user_files:
+                try:
+                    add_personal_image(uploaded.getvalue(), uploaded.name)
+                    imported += 1
+                except SessionStorageError as exc:
+                    st.error(f"{uploaded.name}: {exc}")
+            # Rotate widget ID so uploads are not repeated on every rerun.
+            st.session_state["gallery_uploader_revision"] += 1
+            if imported:
+                st.toast(f"Добавлено изображений: {imported}")
+            st.rerun()
+
     if not items:
-        st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
+        st.info("Галерея пока пуста. Выберите PNG/JPG, вставьте картинку "
+                "из буфера или сохраните область карты.")
+        accept_gallery_paste(gallery_mosaic([]))
         return
 
     # Export is always visible ABOVE the mosaic/editor, not buried below photos.
@@ -532,18 +585,7 @@ def render_gallery_tab() -> None:
             st.session_state["gallery_active_id"] = mosaic_event["image_id"]
             gallery_edit_dialog(mosaic_event["image_id"])
         elif action == "paste_image":
-            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
-            try:
-                image_data = mosaic_event.get("image_data", "")
-                requested = "jpg" if image_data.startswith("data:image/jpeg;") else "png"
-                raw, _ = read_snapshot(image_data, requested)
-                item = add_personal_image(
-                    raw, mosaic_event.get("filename") or "Изображение из буфера.png"
-                )
-                st.toast(f"Добавлено в галерею: {item['title']}")
-                st.rerun()
-            except (SessionStorageError, ValueError, TypeError) as exc:
-                st.error(f"Не удалось вставить изображение: {exc}")
+            accept_gallery_paste(mosaic_event)
         elif action == "reorder":
             new_ids = mosaic_event.get("ids") or []
             if (

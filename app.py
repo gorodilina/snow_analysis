@@ -928,12 +928,14 @@ if connection_error:
         st.write(connection_error)
         st.caption("Секреты не нужно добавлять в GitHub.")
 
-tab_map, tab_gallery = st.tabs([
-    "Карта",
-    f"Галерея ({len(st.session_state['gallery'])})",
-])
+# Stable tab labels avoid resetting selection when a photo is added.
+# Streamlit 1.55+ skips expensive hidden-tab code when on_change="rerun".
+tab_map, tab_gallery = st.tabs(
+    ["Карта", "Галерея"], key="active_view", on_change="rerun"
+)
 
-with tab_map:
+if tab_map.open:
+  with tab_map:
     # Populate this space after the map component reports a screenshot;
     # the editing form is visually above the map, not hidden below the iframe.
     pending_slot = st.empty()
@@ -1054,8 +1056,9 @@ with tab_map:
     with pending_slot.container():
         render_pending_photo_form()
 
-with tab_gallery:
-    render_gallery_tab()
+if tab_gallery.open:
+    with tab_gallery:
+        render_gallery_tab()
 
 # Autosave if the state has actually changed. No credentials or tile URLs
 # are included in the stored payload.

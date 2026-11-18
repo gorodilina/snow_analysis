@@ -62,9 +62,11 @@ def read_snapshot(data_url: str, requested: str = "png") -> tuple[bytes, str]:
             image = original.convert("RGB" if requested == "jpg" else "RGBA")
             output = io.BytesIO()
             if requested == "jpg":
-                image.save(output, format="JPEG", quality=95, subsampling=0, optimize=True)
+                image.save(output, format="JPEG", quality=94, subsampling=0, optimize=False)
             else:
-                image.save(output, format="PNG", optimize=True)
+                # Browser has already encoded the screenshot. A second full
+                # optimize=True PNG pass can freeze Streamlit on large photos.
+                image.save(output, format="PNG", compress_level=2, optimize=False)
         data = output.getvalue()
         if len(data) > MAX_IMAGE_BYTES:
             raise SessionStorageError("Снимок превышает 8 МБ после обработки. Выберите JPG.")

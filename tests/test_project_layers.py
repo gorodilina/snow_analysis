@@ -43,11 +43,11 @@ def make_project():
 
 def test_short_labels_single_and_median():
     single = new_scene_layer("Sentinel-2", date(2025, 6, 15), None)
-    assert single["name"] == "S2 · 15.06.25 · день"
-    assert new_scene_layer("Sentinel-2", date(2025, 6, 15), "COPERNICUS/test", "08:31")["name"] == "S2 · 15.06.25 08:31"
-    assert new_median_layer("Landsat 8/9", date(2025, 6, 1), 5)["name"] == "L8/9 · 01–05.06.25 · мед."
-    assert new_median_layer("Sentinel-2", date(2025, 6, 29), 5)["name"] == "S2 · 29.06–03.07.25 · мед."
-    assert new_median_layer("Sentinel-2", date(2025, 12, 30), 5)["name"] == "S2 · 30.12.25–03.01.26 · мед."
+    assert single["name"] == "S2 · 15.06.2025 · день"
+    assert new_scene_layer("Sentinel-2", date(2025, 6, 15), "COPERNICUS/test", "08:31")["name"] == "S2 · 15.06.2025 08:31"
+    assert new_median_layer("Landsat 8/9", date(2025, 6, 1), 5)["name"] == "L8/9 · 01.06.2025–05.06.2025 · мед."
+    assert new_median_layer("Sentinel-2", date(2025, 6, 29), 5)["name"] == "S2 · 29.06.2025–03.07.2025 · мед."
+    assert new_median_layer("Sentinel-2", date(2025, 12, 30), 5)["name"] == "S2 · 30.12.2025–03.01.2026 · мед."
 
 
 def test_unlimited_distinct_image_ids():
@@ -78,7 +78,7 @@ def test_old_saved_sessions_can_restore_single_image():
     old = {"kind": "median", "satellite": "Sentinel-2", "start": "2025-06-01", "length": 5}
     recovered = migrate_legacy_selection(old)
     assert len(recovered) == 1
-    assert recovered[0]["name"] == "S2 · 01–05.06.25 · мед."
+    assert recovered[0]["name"] == "S2 · 01.06.2025–05.06.2025 · мед."
 
 
 def test_reject_bad_archive_and_duplicate_ids():

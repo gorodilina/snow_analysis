@@ -40,13 +40,14 @@ def test_validate_bounds_and_normalize_gallery():
         normalize_gallery([item, item])
 
 
-def test_reencode_browser_screenshot():
+def test_validate_browser_screenshot_without_reencoding():
     _, photo = example()
     url = "data:image/png;base64," + base64.b64encode(photo).decode()
-    out, fmt = read_snapshot(url, "jpg")
-    assert fmt == "jpg"
-    with PILImage.open(io.BytesIO(out)) as im:
-        assert im.size == (240, 130) and im.format == "JPEG"
+    out, fmt = read_snapshot(url, "png")
+    assert fmt == "png"
+    assert out == photo  # original bytes preserved; no Pillow re-encoding
+    with pytest.raises(SessionStorageError):
+        read_snapshot(url, "jpg")  # MIME must match requested format
     with pytest.raises(SessionStorageError):
         read_snapshot("data:text/html;base64,PGgxPg==", "png")
 
@@ -121,6 +122,7 @@ def test_streamlit_recovers_stale_gallery_selection_after_deletion_or_restore():
     at.session_state["gallery"] = [first]
     at.session_state["gallery_blobs"] = {first["id"]: first_bytes}
     at.session_state["gallery_active_id"] = "gal_00000000000000000000"
+    at.session_state["active_view"] = "Галерея"
     at.run()
     assert not at.exception
     assert at.session_state["gallery_active_id"] == first["id"]
@@ -134,6 +136,7 @@ def test_streamlit_recovers_stale_gallery_selection_after_deletion_or_restore():
     at.session_state["gallery"] = [another]
     at.session_state["gallery_blobs"] = {another["id"]: another_bytes}
     at.session_state["gallery_active_id"] = first["id"]
+    at.session_state["active_view"] = "Галерея"
     at.run()
     assert not at.exception
     assert at.session_state["gallery_active_id"] == another["id"]
@@ -181,3 +184,23 @@ def test_gallery_titles_follow_visible_satellite_images():
     assert suggested_gallery_title(layers, {"overlays": {
         "img_a": {"visible": True}, "img_b": {"visible": True},
     }}) == "S2 · 15.06.25 08:31 + L8/9 · 01–05.06.25 · мед."
+
+def test_gallery_export_is_visible_at_top_of_tab():
+    """Export controls are easy to find above thumbnails, not under the editor."""
+    from pathlib import Path
+    app = (Path(__file__).resolve().parents[1] / "app.py").read_text()
+    assert 'render_gallery_export(items)' in app
+    assert app.index('render_gallery_export(items)', app.index('def render_gallery_tab')) < app.index('cards = []', app.index('def render_gallery_tab'))
+
+
+def test_upload_worker_returns_private_object_key():
+    from gallery_uploads import submit_gallery_upload
+    item, photo = example()
+    storage = Mock()
+    storage.put.return_value = "session/gal_" + "a" * 20 + ".png"
+    token = make_token()
+    future = submit_gallery_upload(storage, token, item, photo)
+    key, seconds = future.result(timeout=5)
+    assert key.startswith("session/gal_")
+    assert seconds >= 0
+    storage.put.assert_called_once()

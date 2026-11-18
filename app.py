@@ -4,10 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import io
+from time import perf_counter
 from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
+from PIL import Image as PILImage
 
 from gee_client import (
     LANDSAT, SENTINEL, initialize_ee, list_month_scenes,
@@ -30,6 +33,7 @@ from gallery import (
     suggested_gallery_title, photo_layer_date, sorted_gallery, validate_bounds,
 )
 from gallery_mosaic import gallery_mosaic, thumbnail_data
+from gallery_uploads import submit_gallery_upload
 from gallery_editor import edit_gallery_image
 from geo_export import export_geotiff, suggested_scale
 from session_store import SessionStorageError, SessionStore, valid_token
@@ -107,6 +111,9 @@ def apply_research_payload(payload: dict):
     )
     st.session_state["gallery_blobs"] = payload.get("_gallery_media") or {}
     st.session_state["gallery_export_bytes"] = None
+    st.session_state["gallery_upload_jobs"] = {}
+    st.session_state["gallery_upload_errors"] = {}
+    st.session_state["gallery_upload_timings"] = {}
     st.session_state["pending_photo"] = None
     st.session_state["gallery_active_id"] = None
     st.session_state["gallery_page"] = 1
@@ -208,6 +215,9 @@ st.session_state.setdefault("gallery_custom_order", False)
 st.session_state.setdefault("gallery", [])
 st.session_state.setdefault("gallery_blobs", {})
 st.session_state.setdefault("gallery_export_bytes", None)
+st.session_state.setdefault("gallery_upload_jobs", {})
+st.session_state.setdefault("gallery_upload_errors", {})
+st.session_state.setdefault("gallery_upload_timings", {})
 st.session_state.setdefault("pending_photo", None)
 st.session_state.setdefault("gallery_active_id", None)
 st.session_state.setdefault("gallery_page", 1)
@@ -253,6 +263,38 @@ def sync_gallery_to_cloud(token: str) -> None:
         item["storage_key"] = gallery_store.put(token, item, blob)
 
 
+@st.cache_data(show_spinner=False, max_entries=96)
+def quick_photo_preview(photo: bytes) -> bytes:
+    """Send a small preview to Streamlit; keep original full-res data elsewhere."""
+    with PILImage.open(io.BytesIO(photo)) as image:
+        image.thumbnail((900, 700), PILImage.Resampling.LANCZOS)
+        preview = image.convert("RGB")
+        out = io.BytesIO()
+        preview.save(out, format="JPEG", quality=79)
+    return out.getvalue()
+
+
+def queue_gallery_uploads(token: str) -> None:
+    """Schedule missing photos; do not block the Streamlit render thread."""
+    if not gallery_store or not token:
+        return
+    jobs = st.session_state["gallery_upload_jobs"]
+    errors = st.session_state["gallery_upload_errors"]
+    for item in st.session_state["gallery"]:
+        ident = item["id"]
+        if item.get("storage_key") or ident in jobs:
+            continue
+        blob = st.session_state["gallery_blobs"].get(ident)
+        if blob is None:
+            errors[ident] = "Исходное изображение не найдено в памяти."
+            continue
+        try:
+            jobs[ident] = submit_gallery_upload(gallery_store, token, item, blob)
+            errors.pop(ident, None)
+        except RuntimeError as exc:
+            errors[ident] = "Не удалось запустить загрузку: " + str(exc)
+
+
 def render_pending_photo_form() -> None:
     """Stage the screenshot first; let the user rename/comment BEFORE upload."""
     pending = st.session_state.get("pending_photo")
@@ -262,7 +304,14 @@ def render_pending_photo_form() -> None:
     with st.container(border=True):
         st.subheader("Новый снимок карты — добавление в галерею")
         st.caption("Название уже заполнено по спутниковому слою. Можно изменить его и добавить заметку.")
-        st.image(pending["data"], width=380)
+        st.image(quick_photo_preview(pending["data"]), width=380)
+        timing = st.session_state.get("capture_diagnostics", {})
+        if timing:
+            st.caption(
+                f"Размер: {timing.get('bytes', 0)/1024/1024:.1f} МБ · "
+                f"захват в браузере: {timing.get('browser_ms', 0)/1000:.1f} с · "
+                f"проверка файла: {timing.get('validation_ms', 0)} мс"
+            )
         with st.form("new_gallery_photo_" + item["id"]):
             title = st.text_input("Название", value=item["title"], max_chars=150)
             note = st.text_area("Заметка (необязательно)", value="", max_chars=3000, height=90)
@@ -274,25 +323,70 @@ def render_pending_photo_form() -> None:
             item["title"] = title.strip() or item["title"]
             item["note"] = note.strip()
             token = st.session_state.get("active_token")
-            if token and gallery_store:
-                try:
-                    item["storage_key"] = gallery_store.put(token, item, pending["data"])
-                except SessionStorageError as exc:
-                    st.warning(
-                        f"Изображение пока хранится только в текущей сессии: {exc}"
-                    )
+            # Append immediately; a network upload must never block the UI.
             st.session_state["gallery_blobs"][item["id"]] = pending["data"]
             st.session_state["gallery"].append(item)
+            if token:
+                queue_gallery_uploads(token)
             if not st.session_state.get("gallery_custom_order", False):
                 st.session_state["gallery"] = sorted_gallery(st.session_state["gallery"])
             st.session_state["gallery_active_id"] = item["id"]
             st.session_state["pending_photo"] = None
             st.session_state["gallery_export_bytes"] = None
             st.session_state["project_backup_bytes"] = None
+            st.toast(
+                "Фото добавлено в галерею. " +
+                ("Загрузка в облако продолжается…" if token
+                 else "Для постоянной ссылки сохраните исследование.")
+            )
             st.rerun()
         if st.button("Отменить этот снимок", key="cancel_pending_photo"):
             st.session_state["pending_photo"] = None
             st.rerun()
+
+
+def render_gallery_export(items: list[dict]) -> None:
+    """Keep ZIP/PDF export prominently visible at the top of Gallery."""
+    with st.container(border=True):
+        st.markdown("#### Выгрузка галереи")
+        st.caption(
+            "ZIP — все фотографии в заданном порядке, с их названиями. "
+            "PDF — сначала общие заметки, затем фотографии с подписями."
+        )
+        export_mode = st.radio(
+            "Формат выгрузки",
+            ["ZIP — фотографии", "PDF — фотографии и заметки"],
+            key="gallery_export_mode",
+            horizontal=True,
+        )
+        is_zip = export_mode.startswith("ZIP")
+        if st.button("Подготовить " + ("ZIP" if is_zip else "PDF"),
+                     key="export_gallery_prepare", use_container_width=True):
+            try:
+                with st.spinner("Готовлю архив галереи..." if is_zip else "Готовлю PDF..."):
+                    pictures = collect_gallery_images(composite=True)
+                    if is_zip:
+                        output = build_gallery_zip(items, pictures)
+                        ext, mime = "zip", "application/zip"
+                    else:
+                        output = build_gallery_pdf(
+                            items, pictures,
+                            st.session_state["research_name"],
+                            project_notes=st.session_state.get("research_note", ""),
+                        )
+                        ext, mime = "pdf", "application/pdf"
+                    st.session_state["gallery_export_bytes"] = (ext, mime, output)
+            except (SessionStorageError, OSError, ValueError) as exc:
+                st.error(f"Не удалось подготовить выгрузку: {exc}")
+        prepared = st.session_state.get("gallery_export_bytes")
+        if prepared and (prepared[0] == "zip") == is_zip:
+            st.download_button(
+                "Скачать галерею ." + prepared[0].upper(),
+                data=prepared[2],
+                file_name="snow-gallery." + prepared[0],
+                mime=prepared[1],
+                use_container_width=True,
+            )
 
 
 def render_gallery_tab() -> None:
@@ -303,9 +397,16 @@ def render_gallery_tab() -> None:
         f"Сохранено изображений: {len(items)}. "
         "Выбери фотографию, чтобы отредактировать название и заметку."
     )
+    if st.session_state.get("gallery_upload_jobs"):
+        st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
+    if st.session_state.get("gallery_upload_errors"):
+        st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
     if not items:
         st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
         return
+
+    # Export is always visible ABOVE the mosaic/editor, not buried below photos.
+    render_gallery_export(items)
 
     ids = {item["id"] for item in items}
     if st.session_state.get("gallery_active_id") not in ids:
@@ -421,35 +522,6 @@ def render_gallery_tab() -> None:
             except SessionStorageError as exc:
                 st.error(f"Не удалось удалить изображение: {exc}")
 
-    st.divider()
-    st.subheader("Выгрузить галерею")
-    export_mode = st.radio(
-        "Формат", ["ZIP — только PNG/JPG", "PDF — изображения и заметки"],
-        key="gallery_export_mode", horizontal=True,
-    )
-    if st.button("Подготовить выгрузку", key="export_gallery_prepare"):
-        try:
-            pictures = collect_gallery_images(composite=True)
-            if export_mode.startswith("ZIP"):
-                output = build_gallery_zip(items, pictures)
-                ext, mime = "zip", "application/zip"
-            else:
-                output = build_gallery_pdf(
-                    items, pictures, st.session_state["research_name"],
-                    project_notes=st.session_state.get("research_note", ""),
-                )
-                ext, mime = "pdf", "application/pdf"
-            st.session_state["gallery_export_bytes"] = (ext, mime, output)
-        except (SessionStorageError, OSError, ValueError) as exc:
-            st.error(f"Не удалось подготовить выгрузку: {exc}")
-    prepared = st.session_state.get("gallery_export_bytes")
-    if prepared and (prepared[0] == "zip") == export_mode.startswith("ZIP"):
-        st.download_button(
-            "Скачать галерею ." + prepared[0].upper(),
-            data=prepared[2],
-            file_name="snow-gallery." + prepared[0],
-            mime=prepared[1], use_container_width=True,
-        )
 
 
 with st.sidebar:
@@ -780,13 +852,19 @@ with st.sidebar:
     elif current_token:
         st.caption("Автосохранение включено. Владелец ссылки может редактировать исследование.")
         st.code(share_link(current_token), language=None)
-        if any(not p.get("storage_key") for p in gallery_items):
-            if st.button("Повторить загрузку изображений в Supabase", use_container_width=True):
-                try:
-                    sync_gallery_to_cloud(current_token)
-                    st.rerun()
-                except SessionStorageError as exc:
-                    st.error(f"Не удалось сохранить галерею: {exc}")
+        incomplete = [p for p in gallery_items if not p.get("storage_key")]
+        if incomplete:
+            st.caption(
+                f"Ожидают облачного сохранения: {len(incomplete)}. "
+                "Не закрывайте вкладку до завершения."
+            )
+            if st.button(
+                "Повторить загрузку изображений в Supabase",
+                use_container_width=True,
+                disabled=bool(st.session_state["gallery_upload_jobs"]),
+            ):
+                queue_gallery_uploads(current_token)
+                st.rerun()
         try:
             st.link_button(
                 "Создать другое исследование",
@@ -796,18 +874,26 @@ with st.sidebar:
             st.caption("Откройте адрес приложения без ?session=… для нового исследования.")
     elif st.button("Сохранить и получить ссылку", type="primary", use_container_width=True):
         try:
-            token = store.create(research_payload(routes, points))
+            # Do not expose an incomplete photo in the public study before
+            # the corresponding file is safely written to private Storage.
+            initial = research_payload(routes, points)
+            initial["gallery"] = [
+                p for p in initial["gallery"] if p.get("storage_key")
+            ]
+            token = store.create(initial)
             st.session_state["active_token"] = token
             st.session_state["loaded_map_revision"] = token
-            if gallery_items:
-                sync_gallery_to_cloud(token)
-            final_payload = research_payload(routes, points)
-            store.save(token, final_payload)
             st.session_state["last_saved_digest"] = hashlib.sha256(
-                json.dumps(final_payload, ensure_ascii=False, sort_keys=True).encode()
+                json.dumps(initial, ensure_ascii=False, sort_keys=True).encode()
             ).hexdigest()
+            if gallery_items:
+                queue_gallery_uploads(token)
             st.query_params["session"] = token
-            st.success("Ссылка создана. Фото галереи сохранены в приватном хранилище.")
+            st.success(
+                "Ссылка создана. " +
+                ("Снимки галереи загружаются в облако — не закрывайте вкладку."
+                 if gallery_items else "Исследование сохранено.")
+            )
             st.code(share_link(token), language=None)
         except (SessionStorageError, ValueError) as exc:
             st.error(f"Не удалось полностью сохранить исследование: {exc}")
@@ -883,12 +969,14 @@ if connection_error:
         st.write(connection_error)
         st.caption("Секреты не нужно добавлять в GitHub.")
 
-tab_map, tab_gallery = st.tabs([
-    "Карта",
-    f"Галерея ({len(st.session_state['gallery'])})",
-])
+# Stable tab labels avoid resetting selection when a photo is added.
+# Streamlit 1.55+ skips expensive hidden-tab code when on_change="rerun".
+tab_map, tab_gallery = st.tabs(
+    ["Карта", "Галерея"], key="active_view", on_change="rerun"
+)
 
-with tab_map:
+if tab_map.open:
+  with tab_map:
     # Populate this space after the map component reports a screenshot;
     # the editing form is visually above the map, not hidden below the iframe.
     pending_slot = st.empty()
@@ -964,7 +1052,13 @@ with tab_map:
                 else:
                     bounds = validate_bounds(map_event.get("bounds"))
                     fmt = map_event.get("image_format", "png")
+                    validation_start = perf_counter()
                     blob, fmt = read_snapshot(map_event.get("image_data", ""), fmt)
+                    st.session_state["capture_diagnostics"] = {
+                        "bytes": len(blob),
+                        "browser_ms": int(map_event.get("capture_ms") or 0),
+                        "validation_ms": round((perf_counter() - validation_start) * 1000),
+                    }
                     item = new_gallery_item(bounds, fmt)
                     capture_state = (
                         incoming_state if isinstance(incoming_state, dict)
@@ -1009,8 +1103,67 @@ with tab_map:
     with pending_slot.container():
         render_pending_photo_form()
 
-with tab_gallery:
-    render_gallery_tab()
+if tab_gallery.open:
+    with tab_gallery:
+        render_gallery_tab()
+
+@st.fragment(run_every=2.0)
+def watch_gallery_uploads() -> None:
+    """Poll asynchronous Supabase uploads without rerunning the entire map."""
+    pending = st.session_state["gallery_upload_jobs"]
+    errors = st.session_state["gallery_upload_errors"]
+    completed = False
+    if pending:
+        for ident, future in list(pending.items()):
+            if not future.done():
+                continue
+            pending.pop(ident, None)
+            try:
+                storage_key, seconds = future.result()
+                match = next(
+                    (item for item in st.session_state["gallery"]
+                     if item["id"] == ident), None
+                )
+                if match is None:
+                    # Uploaded photo was deleted while in flight; avoid returning
+                    # its private object path as a live gallery attachment.
+                    if gallery_store:
+                        try:
+                            gallery_store.remove(storage_key)
+                        except SessionStorageError:
+                            pass
+                else:
+                    match["storage_key"] = storage_key
+                    st.session_state["gallery_upload_timings"][ident] = round(seconds, 2)
+                    errors.pop(ident, None)
+                completed = True
+            except Exception as exc:
+                errors[ident] = str(exc)
+                completed = True
+    if completed:
+        # Let the normal, top-level autosave commit only successfully uploaded
+        # images. The in-memory photo remains available if an upload fails.
+        st.session_state.pop("last_saved_digest", None)
+        st.rerun()
+    if pending:
+        st.caption(
+            f"⏳ Сохраняю в Supabase: {len(pending)} фото. "
+            "Не закрывайте вкладку, пока загрузка не завершена."
+        )
+    elif errors:
+        st.warning(
+            f"Не удалось загрузить {len(errors)} фото. "
+            "Используйте «Повторить загрузку» в боковой панели."
+        )
+    elif st.session_state.get("gallery_upload_timings"):
+        seconds = list(st.session_state["gallery_upload_timings"].values())
+        st.caption(
+            f"✓ Фото в Supabase. Последняя загрузка: {seconds[-1]:.1f} с."
+        )
+
+
+if st.session_state.get("gallery_upload_jobs") or st.session_state.get("gallery_upload_errors"):
+    watch_gallery_uploads()
 
 # Autosave if the state has actually changed. No credentials or tile URLs
 # are included in the stored payload.
@@ -1023,11 +1176,10 @@ if store and token:
         ).hexdigest()
         if snapshot_digest != st.session_state.get("last_saved_digest"):
             if any(not image.get("storage_key") for image in st.session_state["gallery"]):
-                st.warning(
-                    "Некоторые фотографии галереи пока только в памяти. "
-                    "Выполните supabase_gallery_setup.sql и повторите загрузку; "
-                    "пока вся сессия не будет записана в Supabase."
-                )
+                # Preserve the old valid version of the session until all
+                # referenced photos are safely persisted. Non-photo edits
+                # will be saved once outstanding uploads have completed.
+                pass
             else:
                 store.save(token, snapshot)
                 st.session_state["last_saved_digest"] = snapshot_digest

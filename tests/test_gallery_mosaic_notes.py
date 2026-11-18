@@ -138,7 +138,54 @@ def test_interface_formal_address_and_median_help():
     assert "добавьте название или заметку и сохраните" in app
     assert "Выбери фотографию" not in app
     assert "Сначала сохрани или отмени предыдущий снимок." not in app
-    assert "❓ Что такое медиана?" in app
+    assert "median-help-icon" in app and "role=\"tooltip\"" in app
     assert "В этом приложении RGB-медиана вычисляется без маски облаков" in app
     assert "https://t.me/GorodVera" in app
-    assert "OpenTopoMap или Google Terrain" in app
+    assert "OpenTopoMap или «Рельеф (Esri)»" in app
+
+
+def test_clipboard_paste_is_not_replayed_after_gallery_mutations():
+    from gallery_clipboard import record_paste_once
+    seen = []
+    paste = {"action": "paste_image", "event_id": "paste-A", "image_data": "payload"}
+    assert record_paste_once(paste, seen)
+    for action in ("reorder", "select", "delete", "export"):
+        assert not record_paste_once({"action": action, "event_id": action}, seen)
+        assert not record_paste_once(paste, seen)
+    assert record_paste_once({**paste, "event_id": "paste-B"}, seen)
+    assert not record_paste_once({**paste, "event_id": "paste-B"}, seen)
+    assert seen == ["paste-A", "paste-B"]
+    assert not record_paste_once({"action": "paste_image", "event_id": None}, seen)
+
+
+def test_removed_google_basemap_and_old_selection_fallback():
+    from map_builder import map_config
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "app.py").read_text(encoding="utf-8")
+    map_js = (root / "map_component/index.html").read_text(encoding="utf-8")
+    legacy_html = (root / "templates/map.html").read_text(encoding="utf-8")
+    assert "GOOGLE_MAPS_API_KEY" not in app
+    assert "Google Terrain" not in map_js and "Google Terrain" not in legacy_html
+    assert "googleTerrain" not in map_config([], [])
+    assert "input.checked=layer===currentBase" in map_js
+    assert not (root / "google_terrain.py").exists()
+
+
+def test_display_dates_uniform_and_iso_kept_for_sorting():
+    from gallery import gallery_display_date
+    from project_layers import layer_label
+    screenshot, _ = photo("S2 · 20.06.25", "2025-06-20")
+    assert gallery_display_date(screenshot) == "20.06.2025"
+    assert photo_layer_date(screenshot) == "2025-06-20"
+    old, _ = photo("S2 · 01.07.25")
+    old["captured_at"] = "2026-11-18T10:00:00+00:00"
+    assert gallery_display_date(old) == "01.07.2025"
+    assert layer_label({"kind": "scene", "satellite": "Sentinel-2", "day": "2025-06-01"}) == "S2 · 01.06.2025 · день"
+
+
+def test_paste_event_tracking_does_not_share_mosaic_event_id():
+    root = Path(__file__).resolve().parents[1]
+    app = (root / "app.py").read_text(encoding="utf-8")
+    assert 'record_paste_once(event, st.session_state["processed_paste_events"])' in app
+    assert 'st.session_state["processed_mosaic_event"] = eid' not in app
+    assert 'accept_gallery_paste(mosaic_event)' not in app

@@ -27,8 +27,9 @@ from project_archive import (
 from gallery import (
     GalleryStorage, build_gallery_zip, build_gallery_pdf, new_gallery_item,
     normalize_gallery, normalize_annotations, read_snapshot, render_annotations,
-    suggested_gallery_title, validate_bounds,
+    suggested_gallery_title, sorted_gallery, validate_bounds,
 )
+from gallery_mosaic import gallery_mosaic, thumbnail_data
 from gallery_editor import edit_gallery_image
 from geo_export import export_geotiff, suggested_scale
 from session_store import SessionStorageError, SessionStore, valid_token
@@ -90,8 +91,20 @@ def apply_research_payload(payload: dict):
     st.session_state["research_name"] = payload.get("name") or "Новое исследование"
     st.session_state["saved_routes"] = payload.get("routes") or []
     st.session_state["saved_points"] = payload.get("points") or []
-    st.session_state["notes"] = payload.get("notes") or []
-    st.session_state["gallery"] = normalize_gallery(payload.get("gallery") or [])
+    previous_notes = payload.get("notes") or []
+    if isinstance(previous_notes, list):
+        st.session_state["research_note"] = "\n\n".join(
+            str(note.get("text") or "") for note in previous_notes
+            if isinstance(note, dict) and note.get("text")
+        )
+    else:
+        st.session_state["research_note"] = str(previous_notes)
+    st.session_state["gallery_custom_order"] = bool(payload.get("gallery_custom_order", False))
+    loaded_gallery = normalize_gallery(payload.get("gallery") or [])
+    st.session_state["gallery"] = (
+        loaded_gallery if st.session_state["gallery_custom_order"]
+        else sorted_gallery(loaded_gallery)
+    )
     st.session_state["gallery_blobs"] = payload.get("_gallery_media") or {}
     st.session_state["gallery_export_bytes"] = None
     st.session_state["pending_photo"] = None
@@ -138,8 +151,12 @@ def research_payload(routes: list[dict], points: list[dict]) -> dict:
         "name": st.session_state.get("research_name", "Новое исследование"),
         "routes": routes,
         "points": points,
-        "notes": st.session_state.get("notes", []),
+        "notes": (
+            [{"id": "research", "text": st.session_state.get("research_note", ""), "created": ""}]
+            if st.session_state.get("research_note", "").strip() else []
+        ),
         "gallery": normalize_gallery(st.session_state.get("gallery", [])),
+        "gallery_custom_order": bool(st.session_state.get("gallery_custom_order", False)),
         "ui": ui,
         "layers": normalize_layers(st.session_state.get("image_layers", [])),
         "map_state": st.session_state.get("map_state", {}),
@@ -186,7 +203,8 @@ if requested_token and requested_token != st.session_state.get("active_token"):
 
 st.session_state.setdefault("research_name", "Новое исследование")
 st.session_state.setdefault("manual_points", [])
-st.session_state.setdefault("notes", [])
+st.session_state.setdefault("research_note", "")
+st.session_state.setdefault("gallery_custom_order", False)
 st.session_state.setdefault("gallery", [])
 st.session_state.setdefault("gallery_blobs", {})
 st.session_state.setdefault("gallery_export_bytes", None)
@@ -396,7 +414,8 @@ def render_gallery_tab() -> None:
                 ext, mime = "zip", "application/zip"
             else:
                 output = build_gallery_pdf(
-                    items, pictures, st.session_state["research_name"]
+                    items, pictures, st.session_state["research_name"],
+                    project_notes=st.session_state.get("research_note", ""),
                 )
                 ext, mime = "pdf", "application/pdf"
             st.session_state["gallery_export_bytes"] = (ext, mime, output)
@@ -680,29 +699,15 @@ with st.sidebar:
 
     st.divider()
     st.subheader("4. Заметки")
-    with st.form("note_form", clear_on_submit=True):
-        new_note = st.text_area(
-            "Наблюдение о снеговой обстановке",
-            placeholder="Например, 15 июня на северном склоне сохраняется снег...",
-            max_chars=3000,
-            height=90,
-        )
-        if st.form_submit_button("Добавить заметку", use_container_width=True):
-            if new_note.strip():
-                import secrets
-                st.session_state["notes"].append({
-                    "id": secrets.token_hex(8),
-                    "text": new_note.strip(),
-                    "created": date.today().isoformat(),
-                })
-    for note in st.session_state["notes"]:
-        with st.expander(f"{note.get('created','')} · {note.get('text','')[:45]}"):
-            st.write(note.get("text", ""))
-            if st.button("Удалить заметку", key="delete_note_"+note["id"]):
-                st.session_state["notes"] = [
-                    n for n in st.session_state["notes"] if n["id"] != note["id"]
-                ]
-                st.rerun()
+    st.text_area(
+        "Заметки об исследовании",
+        key="research_note",
+        placeholder="Наблюдения о снеговой обстановке, выводы и комментарии...",
+        height=180,
+        max_chars=18000,
+        help="Единое поле. Изменения автоматически сохраняются вместе с исследованием.",
+    )
+    st.caption("Отдельная кнопка сохранения не нужна: текст входит в автосохранение исследования.")
 
     st.divider()
     st.subheader("5. Сохранение исследования по ссылке")
@@ -749,24 +754,6 @@ with st.sidebar:
             st.code(share_link(token), language=None)
         except (SessionStorageError, ValueError) as exc:
             st.error(f"Не удалось полностью сохранить исследование: {exc}")
-
-    with st.expander("Резервная копия всего исследования (ZIP)"):
-        st.caption("Отдельно от экспорта галереи: все треки, слои, заметки и фотографии.")
-        if st.button("Подготовить резервную копию", use_container_width=True):
-            try:
-                st.session_state["project_backup_bytes"] = build_project_zip(
-                    research_payload(routes, points), collect_gallery_images()
-                )
-            except (SessionStorageError, ValueError) as exc:
-                st.error(f"Не удалось создать резервный ZIP: {exc}")
-        if st.session_state.get("project_backup_bytes"):
-            st.download_button(
-                "Скачать резервную копию",
-                data=st.session_state["project_backup_bytes"],
-                file_name=safe_export_filename(st.session_state["research_name"]),
-                mime="application/zip",
-                use_container_width=True,
-            )
 
     st.divider()
     st.subheader("6. Геопривязанный GeoTIFF")

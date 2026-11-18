@@ -42,6 +42,14 @@ def gallery_mosaic(photos: list[dict]) -> dict | None:
         ], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:20]
     return _component(
-        photos=photos, revision=revision,
+        photos=photos, revision=revision, paste_only=False,
         key="snow_gallery_mosaic", default=None,
+    )
+
+
+def gallery_paste() -> dict | None:
+    """Standalone clipboard drop zone, independently mounted above the grid."""
+    return _component(
+        photos=[], revision="paste", paste_only=True,
+        key="snow_gallery_paste", default=None,
     )

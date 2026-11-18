@@ -30,7 +30,7 @@ from gallery import (
     render_annotations, suggested_gallery_title, photo_layer_date, sorted_gallery,
     validate_bounds,
 )
-from gallery_mosaic import gallery_mosaic, thumbnail_data
+from gallery_mosaic import gallery_mosaic, gallery_paste, thumbnail_data
 from gallery_uploads import submit_gallery_upload
 from gallery_editor import edit_gallery_image
 from geo_export import export_geotiff, suggested_scale, geotiff_filename
@@ -215,6 +215,9 @@ if requested_token and requested_token != st.session_state.get("active_token"):
             st.error(f"Не удалось открыть исследование: {exc}")
 
 st.session_state.setdefault("research_name", "Новое исследование")
+# Saved sessions may still use the old label; keep their selection valid.
+if st.session_state.get("mode") == "Медианная мозаика":
+    st.session_state["mode"] = "Медиана"
 st.session_state.setdefault("manual_points", [])
 st.session_state.setdefault("research_note", "")
 st.session_state.setdefault("gallery_custom_order", False)
@@ -388,7 +391,8 @@ def render_gallery_export(items: list[dict]) -> None:
         )
         is_zip = export_mode.startswith("ZIP")
         if st.button("Подготовить " + ("ZIP" if is_zip else "PDF"),
-                     key="export_gallery_prepare", use_container_width=True):
+                     key="export_gallery_prepare", use_container_width=True,
+                     disabled=not items):
             try:
                 with st.spinner("Готовлю архив галереи..." if is_zip else "Готовлю PDF..."):
                     pictures = collect_gallery_images(composite=True)
@@ -431,7 +435,7 @@ def gallery_edit_dialog(image_id: str) -> None:
         except SessionStorageError as exc:
             st.warning(str(exc))
         if st.toggle(
-            "✏️ Рисовать поверх фотографии (линии, стрелки, подписи)",
+            "Рисовать поверх фотографии (линии, стрелки, подписи)",
             key="gallery_draw_" + active["id"],
         ):
             st.caption(
@@ -524,43 +528,39 @@ def render_gallery_tab() -> None:
         st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
     if st.session_state.get("gallery_upload_errors"):
         st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
-    with st.container(border=True):
-        st.markdown("#### Добавить свои изображения")
-        st.caption(
-            "Можно выбрать PNG/JPG с устройства или вставить изображение из "
-            "буфера обмена (Ctrl+V в области вставки под этим блоком). "
-            "Для больших картографических скриншотов сохранение может "
-            "занимать заметное время; быстрее сделать обычный скриншот "
-            "и загрузить его сюда. Лимит: 8 МБ / 10 Мп на файл."
-        )
-        user_files = st.file_uploader(
-            "Выбрать PNG/JPG",
-            type=["png", "jpg", "jpeg"],
-            accept_multiple_files=True,
-            key=f"user_gallery_files_{st.session_state['gallery_uploader_revision']}",
-        )
-        if user_files:
-            imported = 0
-            for uploaded in user_files:
-                try:
-                    add_personal_image(uploaded.getvalue(), uploaded.name)
-                    imported += 1
-                except SessionStorageError as exc:
-                    st.error(f"{uploaded.name}: {exc}")
-            # Rotate widget ID so uploads are not repeated on every rerun.
-            st.session_state["gallery_uploader_revision"] += 1
-            if imported:
-                st.toast(f"Добавлено изображений: {imported}")
-            st.rerun()
+    # Keep upload and export controls side by side; the mosaic remains full-width.
+    upload_col, export_col = st.columns(2, gap="medium")
+    with upload_col:
+        with st.container(border=True):
+            st.markdown("#### Добавить свои изображения")
+            user_files = st.file_uploader(
+                "Выбрать PNG/JPG",
+                type=["png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                key=f"user_gallery_files_{st.session_state['gallery_uploader_revision']}",
+            )
+            if user_files:
+                imported = 0
+                for uploaded in user_files:
+                    try:
+                        add_personal_image(uploaded.getvalue(), uploaded.name)
+                        imported += 1
+                    except SessionStorageError as exc:
+                        st.error(f"{uploaded.name}: {exc}")
+                # Rotate widget ID so uploads are not repeated on every rerun.
+                st.session_state["gallery_uploader_revision"] += 1
+                if imported:
+                    st.toast(f"Добавлено изображений: {imported}")
+                st.rerun()
+            # Dedicated clipboard zone is placed immediately below the uploader.
+            accept_gallery_paste(gallery_paste())
+    with export_col:
+        render_gallery_export(items)
 
     if not items:
         st.info("Галерея пока пуста. Выберите PNG/JPG, вставьте картинку "
                 "из буфера или сохраните область карты.")
-        accept_gallery_paste(gallery_mosaic([]))
         return
-
-    # Export is always visible ABOVE the mosaic/editor, not buried below photos.
-    render_gallery_export(items)
 
     ids = {item["id"] for item in items}
     if st.session_state.get("gallery_active_id") not in ids:
@@ -615,16 +615,37 @@ def render_gallery_tab() -> None:
 
 
 
+@st.dialog("Возможности приложения", width="large")
+def show_app_capabilities() -> None:
+    st.markdown(
+        """
+**Маршрут и точки.** Загрузите KML/GPX-треки, CSV с точками или добавьте точки вручную. Управляйте отображением треков и подписей на карте.
+
+**Спутниковые снимки.** Просматривайте отдельные сцены Sentinel-2 и Landsat 8/9 или создавайте медиану за выбранный период.
+
+**Снег и температура.** Для снимков доступны граница снега по NDSI и изотермы −5, 0, +5, +10 °C на основе ERA5-Land. Видимость и прозрачность слоёв настраиваются на карте.
+
+**Галерея.** Сохраняйте фрагменты карты, добавляйте PNG/JPG с устройства или через Ctrl+V, меняйте порядок изображений, подписи и рисуйте поверх снимков.
+
+**Выгрузка результатов.** Экспортируйте галерею в ZIP или в PDF вместе с заметками. Для выбранной области спутникового слоя доступен геопривязанный GeoTIFF.
+
+**Сохранение проекта.** Исследование можно сохранить по ссылке; при подключённом хранилище последующие изменения сохраняются автоматически. Проект можно удалить целиком.
+
+*Важно:* снежная граница по NDSI может включать ледники, а изотермы ERA5-Land являются модельной оценкой, а не измерениями на склоне.
+"""
+    )
+
+
 with st.sidebar:
     st.title("🏔️ Анализ снежной обстановки")
-    st.caption("Спутниковые снимки, граница снега и изотермы вдоль трека")
+    if st.button("ⓘ Возможности приложения", use_container_width=True):
+        show_app_capabilities()
     st.subheader("1. Трек и точки")
     uploads = st.file_uploader(
         "Загрузить файлы KML или GPX",
         type=["kml", "gpx", "csv"],
         accept_multiple_files=True,
         key=f"geo_files_{st.session_state.get('geo_uploader_revision', 0)}",
-        help="Выберите несколько файлов одновременно. CSV — для точек.",
     )
 
     with st.expander("Добавить точку вручную"):
@@ -647,8 +668,8 @@ with st.sidebar:
 
     st.divider()
     st.subheader("2. Спутниковые снимки")
-    mode = st.radio("Режим", ["Конкретный снимок", "Медианная мозаика"], key="mode")
-    if mode == "Медианная мозаика":
+    mode = st.radio("Режим", ["Конкретный снимок", "Медиана"], key="mode")
+    if mode == "Медиана":
         satellite = st.selectbox("Источник", [SENTINEL, LANDSAT], key="satellite")
     else:
         satellite = None  # Both satellites are searched simultaneously.
@@ -774,10 +795,7 @@ def current_tile_layers(region: list[float], is_connected: bool) -> list[dict]:
 
 
 st.title("Анализ снежной обстановки")
-st.caption(
-    f"Трек: {route_status} · линий: {len(routes)} · точек: {len(points)}. "
-    "Снег — по NDSI; изотермы — модельная оценка ERA5-Land."
-)
+st.caption("Снег — по NDSI; изотермы — модельная оценка ERA5-Land.")
 
 with st.sidebar:
     if not connected:
@@ -863,7 +881,7 @@ with st.sidebar:
         else:
             st.caption("Выберите год и месяц, затем нажмите «Найти доступные даты».")
     else:
-        st.markdown("**3. Медианная мозаика**")
+        st.markdown("**3. Медиана**")
         median_start = st.date_input(
             "Первый день интервала", value=date(2025, 6, 1), key="median_start"
         )
@@ -903,20 +921,17 @@ with st.sidebar:
     st.divider()
     st.subheader("4. Заметки")
     st.text_area(
-        "Заметки об исследовании",
+        "Доступны к выгрузке вместе с галереей",
         key="research_note",
-        placeholder="Наблюдения о снеговой обстановке, выводы и комментарии...",
+        placeholder="Жалобы, петиции, ходатайства, прошения, уведомления, заявления...",
         height=180,
         max_chars=18000,
-        help="Единое поле. Изменения автоматически сохраняются вместе с исследованием.",
     )
-    st.caption("Отдельная кнопка сохранения не нужна: текст входит в автосохранение исследования.")
 
     st.divider()
     st.subheader("5. Сохранение исследования по ссылке")
     gallery_items = st.session_state["gallery"]
 
-    st.text_input("Название исследования", key="research_name", max_chars=120)
     current_token = st.session_state.get("active_token")
     if not store:
         st.caption(
@@ -1080,8 +1095,6 @@ with st.sidebar:
         st.session_state["runtime_tiles"] = {}
         st.session_state["analysis_tiles"] = {}
         st.rerun()
-    st.caption("Граница снега и изотермы −5/0/+5/+10 °C включаются отдельно, "
-               "имеют собственные цвета и повторяют прозрачность своего снимка.")
 
 if connection_error:
     with st.expander("Настройка доступа к Earth Engine"):

@@ -6,7 +6,7 @@
 *{box-sizing:border-box}
 html,body{padding:0;margin:0;background:transparent;font:13px system-ui,-apple-system,sans-serif;color:#25303b}
 .hint{display:flex;gap:8px;align-items:center;color:#748292;font-size:12px;margin:2px 3px 12px}
-#paste-zone{border:1px dashed #8ba9cf;border-radius:9px;background:#f3f7fc;padding:11px 14px;margin-bottom:13px;color:#315174;cursor:pointer;line-height:1.6;outline:0}
+#paste-zone{display:none;border:1px dashed #8ba9cf;border-radius:9px;background:#f3f7fc;padding:11px 14px;margin-bottom:13px;color:#315174;cursor:pointer;line-height:1.6;outline:0}
 #paste-zone:focus{border-color:#1768cd;box-shadow:0 0 0 2px #b8d8ff}
 #paste-status{font-size:12px;color:#60728c}
 .hint svg{width:15px;height:15px}
@@ -25,7 +25,7 @@ html,body{padding:0;margin:0;background:transparent;font:13px system-ui,-apple-s
 #message{min-height:1px}
 @media(max-width:500px){#mosaic{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tile .meta{padding:7px}}
 </style></head><body>
-<div class="hint"><span>⠿</span><span>Перетащите снимки, чтобы изменить порядок. Нажмите на карточку для редактирования.</span></div>
+<div class="hint" id="gallery-hint"><span>⠿</span><span>Перетащите снимки, чтобы изменить порядок. Нажмите на карточку для редактирования.</span></div>
 <div id="paste-zone" tabindex="0" role="button" aria-label="Вставить картинку">
   <b>Вставить изображение из буфера</b> — нажмите сюда, затем Ctrl+V (⌘V на Mac)
   <div id="paste-status">Поддерживаются PNG и JPG до 8 МБ.</div>
@@ -33,7 +33,7 @@ html,body{padding:0;margin:0;background:transparent;font:13px system-ui,-apple-s
 <div id="mosaic" aria-label="Галерея снимков"></div><div id="message"></div>
 <script>
 'use strict';
-let lastRevision='',selectedDragging='',suppressClick=false,eventCounter=0;
+let lastRevision='',selectedDragging='',suppressClick=false,eventCounter=0,pasteOnlyMode=false;
 const mosaic=document.getElementById('mosaic');
 function eventId(){return String(Date.now())+'-'+(++eventCounter);}
 function emit(action,payload){
@@ -70,6 +70,7 @@ pasteZone.addEventListener('keydown',e=>{
   if(e.key==='Enter'||e.key===' '){e.preventDefault();pasteZone.focus();}
 });
 document.addEventListener('paste',e=>{
+  if(!pasteOnlyMode)return;
   const images=Array.from(e.clipboardData?.items||[])
     .filter(item=>item.kind==='file'&&item.type.startsWith('image/'));
   if(!images.length)return;
@@ -163,6 +164,10 @@ function render(photos){
 window.addEventListener('message',event=>{
   if(!event.data||event.data.type!=='streamlit:render')return;
   const args=event.data.args||{};
+  pasteOnlyMode=Boolean(args.paste_only);
+  document.getElementById('gallery-hint').style.display=pasteOnlyMode?'none':'flex';
+  pasteZone.style.display=pasteOnlyMode?'block':'none';
+  mosaic.style.display=pasteOnlyMode?'none':'grid';
   const revision=String(args.revision||'');
   if(revision===lastRevision)return;
   lastRevision=revision;

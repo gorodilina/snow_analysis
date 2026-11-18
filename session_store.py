@@ -78,6 +78,7 @@ class SessionStore:
             "Accept": "application/json",
             "Prefer": "return=minimal",
         }
+        headers.update(kwargs.pop("headers", {}))
         try:
             response = requests.request(
                 method, self.endpoint, headers=headers, timeout=(5, 20), **kwargs
@@ -108,6 +109,22 @@ class SessionStore:
             "POST", json={"token": token, "payload": normalize_payload(payload)}
         )
         return token
+
+    def delete(self, token: str) -> None:
+        """Delete one research row, strictly scoped to its random link token."""
+        if not valid_token(token):
+            raise SessionStorageError("Некорректная ссылка на исследование.")
+        # Return the affected row so a no-op never looks like successful deletion.
+        response = self._request(
+            "DELETE",
+            params={"token": "eq." + token, "select": "token"},
+            headers={"Prefer": "return=representation"},
+        )
+        rows = response.json()
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise SessionStorageError(
+                "Не удалось подтвердить удаление исследования из базы."
+            )
 
     def save(self, token: str, payload: dict[str, Any]) -> None:
         if not valid_token(token):

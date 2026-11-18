@@ -73,6 +73,25 @@ def read_snapshot(data_url: str, requested: str = "png") -> tuple[bytes, str]:
         raise SessionStorageError("Не удалось проверить снимок карты.") from exc
 
 
+def read_user_image(raw: bytes, filename: str = "Фото") -> tuple[bytes, str]:
+    """Validate uploaded/pasted PNG/JPG without re-encoding or stripping pixels."""
+    if not isinstance(raw, bytes) or len(raw) > MAX_IMAGE_BYTES:
+        raise SessionStorageError("Изображение превышает 8 МБ.")
+    if not raw:
+        raise SessionStorageError("Пустое изображение.")
+    try:
+        with PILImage.open(io.BytesIO(raw)) as im:
+            fmt = {"PNG": "png", "JPEG": "jpg"}.get(im.format)
+            if not fmt:
+                raise SessionStorageError("Поддерживаются только PNG и JPG.")
+            if im.width * im.height > MAX_PIXELS:
+                raise SessionStorageError("Изображение превышает 10 мегапикселей.")
+            im.verify()
+        return raw, fmt
+    except (OSError, ValueError, SyntaxError, UnidentifiedImageError) as exc:
+        raise SessionStorageError("Не удалось проверить изображение.") from exc
+
+
 def normalize_annotations(annotations: list | None) -> list[dict]:
     """Validate normalized vector annotations; raw image bytes stay untouched."""
     if annotations is None:
@@ -205,7 +224,10 @@ def normalize_gallery(items: list) -> list[dict]:
             "title": str(item.get("title") or "")[:150],
             "note": str(item.get("note") or "")[:3000],
             "format": fmt,
-            "bounds": validate_bounds(item.get("bounds")),
+            "bounds": (
+                validate_bounds(item["bounds"]) if item.get("bounds") is not None
+                else None
+            ),
             "storage_key": key,
             "captured_at": str(item.get("captured_at") or "")[:40],
             "source_date": str(item.get("source_date") or "")[:10],
@@ -263,13 +285,13 @@ def sorted_gallery(items: list[dict]) -> list[dict]:
     ), reverse=True)
 
 
-def new_gallery_item(bounds: list, fmt: str = "png") -> dict:
+def new_gallery_item(bounds: list | None, fmt: str = "png") -> dict:
     return {
         "id": "gal_" + secrets.token_hex(10),
         "title": "",
         "note": "",
         "format": fmt,
-        "bounds": validate_bounds(bounds),
+        "bounds": validate_bounds(bounds) if bounds is not None else None,
         "storage_key": None,
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         "source_date": "",
@@ -327,6 +349,67 @@ class GalleryStorage:
 
     def remove(self, storage_key: str) -> None:
         self._call("DELETE", self._url(storage_key))
+
+    def list_project_keys(self, token: str) -> list[str]:
+        """List every private file under the exact session token prefix."""
+        if not valid_token(token):
+            raise SessionStorageError("Некорректная ссылка на исследование.")
+        prefix = token + "/"
+        files = []
+        offset = 0
+        while True:
+            result = self._call(
+                "POST", self.url + "/storage/v1/object/list/" + self.bucket,
+                headers={"Content-Type": "application/json"},
+                json={"prefix": prefix, "limit": 100, "offset": offset},
+            )
+            import json
+            try:
+                batch = json.loads(result)
+            except (ValueError, TypeError) as exc:
+                raise SessionStorageError("Supabase не вернул список фотографий.") from exc
+            if not isinstance(batch, list):
+                raise SessionStorageError("Некорректный ответ хранилища фотографий.")
+            for obj in batch:
+                if not isinstance(obj, dict):
+                    raise SessionStorageError("Некорректный файл в хранилище.")
+                filename = str(obj.get("name", ""))
+                path = prefix + filename
+                if not STORAGE_PATH_RE.fullmatch(path):
+                    raise SessionStorageError(
+                        "Обнаружен посторонний файл в каталоге проекта; удаление остановлено."
+                    )
+                files.append(path)
+            if len(batch) < 100:
+                break
+            offset += len(batch)
+            if offset > 5000:
+                raise SessionStorageError("Слишком много фотографий в каталоге проекта.")
+        return files
+
+    def remove_project_files(self, token: str) -> int:
+        """Delete *all* project images through Storage API, not SQL metadata.
+
+        This catches orphaned uploads absent from the JSON gallery. When Storage
+        raises, the caller must NOT delete the corresponding research row.
+        """
+        keys = self.list_project_keys(token)
+        if not keys:
+            return 0
+        endpoint = self.url + "/storage/v1/object/" + self.bucket
+        for start in range(0, len(keys), 100):
+            chunk = keys[start:start + 100]
+            self._call(
+                "DELETE", endpoint,
+                headers={"Content-Type": "application/json"},
+                json={"prefixes": chunk},
+            )
+        if self.list_project_keys(token):
+            raise SessionStorageError(
+                "Не все фотографии удалены из Storage; запись проекта сохранена."
+            )
+        return len(keys)
+
 
 
 def gallery_export_filename(title: str, fmt: str, used: set[str]) -> str:

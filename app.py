@@ -24,18 +24,17 @@ from project_layers import (
     migrate_legacy_selection, new_median_layer, new_scene_layer, normalize_layers,
     contour_flags,
 )
-from project_archive import (
-    build_project_zip, import_project_zip, safe_export_filename,
-)
 from gallery import (
     GalleryStorage, build_gallery_zip, build_gallery_pdf, new_gallery_item,
-    normalize_gallery, normalize_annotations, read_snapshot, render_annotations,
-    suggested_gallery_title, photo_layer_date, sorted_gallery, validate_bounds,
+    normalize_gallery, normalize_annotations, read_snapshot, read_user_image,
+    render_annotations, suggested_gallery_title, photo_layer_date, sorted_gallery,
+    validate_bounds,
 )
 from gallery_mosaic import gallery_mosaic, thumbnail_data
 from gallery_uploads import submit_gallery_upload
 from gallery_editor import edit_gallery_image
-from geo_export import export_geotiff, suggested_scale
+from geo_export import export_geotiff, suggested_scale, geotiff_filename
+from project_delete import delete_project
 from session_store import SessionStorageError, SessionStore, valid_token
 
 ROOT = Path(__file__).resolve().parent
@@ -118,6 +117,7 @@ def apply_research_payload(payload: dict):
     st.session_state["gallery_active_id"] = None
     st.session_state["gallery_page"] = 1
     st.session_state["geotiff_bytes"] = None
+    st.session_state["gallery_uploader_revision"] = st.session_state.get("gallery_uploader_revision", 0) + 1
     st.session_state["manual_points"] = []
     # Rotate the uploader key instead of writing into a non-settable file widget.
     st.session_state["geo_uploader_revision"] = st.session_state.get("geo_uploader_revision", 0) + 1
@@ -187,6 +187,12 @@ if setting("SUPABASE_URL", "") and setting("SUPABASE_SECRET_KEY", ""):
     except SessionStorageError as exc:
         st.warning(f"Хранилище исследований: {exc}")
 
+if st.session_state.pop("reset_after_delete", False):
+    # Rehydrate only at the top of a new run, before widgets are instantiated.
+    apply_research_payload({})
+    st.session_state["loaded_map_revision"] = "deleted-session"
+    st.session_state.pop("delete_project_phrase", None)
+
 requested_token = st.query_params.get("session", "")
 if requested_token and requested_token != st.session_state.get("active_token"):
     if not valid_token(requested_token):
@@ -221,6 +227,7 @@ st.session_state.setdefault("gallery_upload_timings", {})
 st.session_state.setdefault("pending_photo", None)
 st.session_state.setdefault("gallery_active_id", None)
 st.session_state.setdefault("gallery_page", 1)
+st.session_state.setdefault("gallery_uploader_revision", 0)
 st.session_state.setdefault("geotiff_bytes", None)
 st.session_state.setdefault("map_state", {})
 st.session_state.setdefault("image_layers", [])
@@ -234,7 +241,7 @@ def gallery_image_bytes(item: dict) -> bytes:
     if local is not None:
         return local
     if not item.get("storage_key") or not gallery_store:
-        raise SessionStorageError("Изображение недоступно. Восстановите проект из ZIP.")
+        raise SessionStorageError("Изображение не найдено в галерее. Проверьте облачное сохранение.")
     data = gallery_store.get(item["storage_key"])
     st.session_state["gallery_blobs"][ident] = data
     return data
@@ -293,6 +300,26 @@ def queue_gallery_uploads(token: str) -> None:
             errors.pop(ident, None)
         except RuntimeError as exc:
             errors[ident] = "Не удалось запустить загрузку: " + str(exc)
+
+
+def add_personal_image(raw: bytes, filename: str = "Изображение") -> dict:
+    """Add an uploaded or pasted photo (without claiming satellite georeferencing)."""
+    if len(st.session_state["gallery"]) >= 250:
+        raise SessionStorageError("В галерее достигнут предел 250 изображений.")
+    data, fmt = read_user_image(raw, filename)
+    item = new_gallery_item(None, fmt)
+    label = Path(filename or "Изображение").stem.strip()
+    item["title"] = (label or "Загруженное изображение")[:150]
+    st.session_state["gallery_blobs"][item["id"]] = data
+    st.session_state["gallery"].append(item)
+    if not st.session_state.get("gallery_custom_order", False):
+        st.session_state["gallery"] = sorted_gallery(st.session_state["gallery"])
+    st.session_state["gallery_active_id"] = item["id"]
+    st.session_state["gallery_export_bytes"] = None
+    token = st.session_state.get("active_token")
+    if token:
+        queue_gallery_uploads(token)
+    return item
 
 
 def render_pending_photo_form() -> None:
@@ -389,76 +416,14 @@ def render_gallery_export(items: list[dict]) -> None:
             )
 
 
-def render_gallery_tab() -> None:
-    """Independent, paged thumbnail gallery with explicit per-photo editor."""
+@st.dialog("Просмотр и редактирование изображения", width="large")
+def gallery_edit_dialog(image_id: str) -> None:
+    """A real modal opened by clicking any masonry card (not below the grid)."""
     items = st.session_state["gallery"]
-    st.subheader("Галерея")
-    st.caption(
-        f"Сохранено изображений: {len(items)}. "
-        "Выбери фотографию, чтобы отредактировать название и заметку."
-    )
-    if st.session_state.get("gallery_upload_jobs"):
-        st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
-    if st.session_state.get("gallery_upload_errors"):
-        st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
-    if not items:
-        st.info("Галерея пока пуста. Во вкладке «Карта» выдели область и сохрани её.")
+    active = next((item for item in items if item["id"] == image_id), None)
+    if active is None:
+        st.warning("Изображение уже удалено.")
         return
-
-    # Export is always visible ABOVE the mosaic/editor, not buried below photos.
-    render_gallery_export(items)
-
-    ids = {item["id"] for item in items}
-    if st.session_state.get("gallery_active_id") not in ids:
-        st.session_state["gallery_active_id"] = items[-1]["id"]
-
-    cards = []
-    for item in items:
-        try:
-            source = gallery_image_bytes(item)
-            annotations = json.dumps(item.get("annotations", []), sort_keys=True)
-            thumbnail = thumbnail_data(source, item["format"], annotations)
-        except (SessionStorageError, OSError, ValueError) as exc:
-            st.warning(f"Миниатюра «{item.get('title', '')}» недоступна: {exc}")
-            thumbnail = ""
-        cards.append({
-            "id": item["id"],
-            "title": item.get("title", ""),
-            "source_date": photo_layer_date(item),
-            "thumbnail": thumbnail,
-        })
-    mosaic_event = gallery_mosaic(cards)
-    if isinstance(mosaic_event, dict) and (
-        mosaic_event.get("event_id") != st.session_state.get("processed_mosaic_event")
-    ):
-        action = mosaic_event.get("action")
-        if action == "select" and mosaic_event.get("image_id") in ids:
-            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
-            st.session_state["gallery_active_id"] = mosaic_event["image_id"]
-            st.rerun()
-        elif action == "reorder":
-            new_ids = mosaic_event.get("ids") or []
-            if (
-                isinstance(new_ids, list) and len(new_ids) == len(items)
-                and set(new_ids) == ids
-            ):
-                st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
-                by_id = {item["id"]: item for item in items}
-                st.session_state["gallery"] = [by_id[ident] for ident in new_ids]
-                st.session_state["gallery_custom_order"] = True
-                st.session_state["gallery_export_bytes"] = None
-                st.rerun()
-            else:
-                st.warning("Некорректный порядок галереи. Изменения не применены.")
-    if st.session_state.get("gallery_custom_order"):
-        if st.button("Вернуть порядок по дате снимков", use_container_width=False):
-            st.session_state["gallery_custom_order"] = False
-            st.session_state["gallery"] = sorted_gallery(items)
-            st.session_state["gallery_export_bytes"] = None
-            st.rerun()
-
-    active_id = st.session_state["gallery_active_id"]
-    active = next((item for item in items if item["id"] == active_id), items[-1])
     with st.container(border=True):
         st.markdown("#### Выбранное изображение")
         try:
@@ -524,27 +489,136 @@ def render_gallery_tab() -> None:
 
 
 
+
+def accept_gallery_paste(event: dict | None) -> bool:
+    """Handle a single clipboard upload from the gallery iframe."""
+    if not isinstance(event, dict) or event.get("action") != "paste_image":
+        return False
+    eid = event.get("event_id")
+    if not eid or eid == st.session_state.get("processed_mosaic_event"):
+        return False
+    st.session_state["processed_mosaic_event"] = eid
+    try:
+        data_url = event.get("image_data", "")
+        fmt = "jpg" if data_url.startswith("data:image/jpeg;") else "png"
+        raw, _ = read_snapshot(data_url, fmt)
+        item = add_personal_image(
+            raw, event.get("filename") or "Изображение из буфера.png"
+        )
+        st.toast(f"Добавлено в галерею: {item['title']}")
+        st.rerun()
+    except (SessionStorageError, ValueError, TypeError) as exc:
+        st.error(f"Не удалось вставить изображение: {exc}")
+    return True
+
+
+def render_gallery_tab() -> None:
+    """Independent, paged thumbnail gallery with explicit per-photo editor."""
+    items = st.session_state["gallery"]
+    st.subheader("Галерея")
+    st.caption(
+        f"Сохранено изображений: {len(items)}. "
+        "Выбери фотографию, чтобы отредактировать название и заметку."
+    )
+    if st.session_state.get("gallery_upload_jobs"):
+        st.caption("⏳ Фотографии загружаются в Supabase. До подтверждения не закрывайте вкладку.")
+    if st.session_state.get("gallery_upload_errors"):
+        st.warning("Не все фотографии сохранены в облаке. Повторите загрузку через раздел сохранения.")
+    with st.container(border=True):
+        st.markdown("#### Добавить свои изображения")
+        st.caption(
+            "Можно выбрать PNG/JPG с устройства или вставить изображение из "
+            "буфера обмена (Ctrl+V в области вставки под этим блоком). "
+            "Для больших картографических скриншотов сохранение может "
+            "занимать заметное время; быстрее сделать обычный скриншот "
+            "и загрузить его сюда. Лимит: 8 МБ / 10 Мп на файл."
+        )
+        user_files = st.file_uploader(
+            "Выбрать PNG/JPG",
+            type=["png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            key=f"user_gallery_files_{st.session_state['gallery_uploader_revision']}",
+        )
+        if user_files:
+            imported = 0
+            for uploaded in user_files:
+                try:
+                    add_personal_image(uploaded.getvalue(), uploaded.name)
+                    imported += 1
+                except SessionStorageError as exc:
+                    st.error(f"{uploaded.name}: {exc}")
+            # Rotate widget ID so uploads are not repeated on every rerun.
+            st.session_state["gallery_uploader_revision"] += 1
+            if imported:
+                st.toast(f"Добавлено изображений: {imported}")
+            st.rerun()
+
+    if not items:
+        st.info("Галерея пока пуста. Выберите PNG/JPG, вставьте картинку "
+                "из буфера или сохраните область карты.")
+        accept_gallery_paste(gallery_mosaic([]))
+        return
+
+    # Export is always visible ABOVE the mosaic/editor, not buried below photos.
+    render_gallery_export(items)
+
+    ids = {item["id"] for item in items}
+    if st.session_state.get("gallery_active_id") not in ids:
+        st.session_state["gallery_active_id"] = items[-1]["id"]
+
+    cards = []
+    for item in items:
+        try:
+            source = gallery_image_bytes(item)
+            annotations = json.dumps(item.get("annotations", []), sort_keys=True)
+            thumbnail = thumbnail_data(source, item["format"], annotations)
+        except (SessionStorageError, OSError, ValueError) as exc:
+            st.warning(f"Миниатюра «{item.get('title', '')}» недоступна: {exc}")
+            thumbnail = ""
+        cards.append({
+            "id": item["id"],
+            "title": item.get("title", ""),
+            "source_date": photo_layer_date(item),
+            "thumbnail": thumbnail,
+        })
+    mosaic_event = gallery_mosaic(cards)
+    if isinstance(mosaic_event, dict) and (
+        mosaic_event.get("event_id") != st.session_state.get("processed_mosaic_event")
+    ):
+        action = mosaic_event.get("action")
+        if action == "select" and mosaic_event.get("image_id") in ids:
+            st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+            st.session_state["gallery_active_id"] = mosaic_event["image_id"]
+            gallery_edit_dialog(mosaic_event["image_id"])
+        elif action == "paste_image":
+            accept_gallery_paste(mosaic_event)
+        elif action == "reorder":
+            new_ids = mosaic_event.get("ids") or []
+            if (
+                isinstance(new_ids, list) and len(new_ids) == len(items)
+                and set(new_ids) == ids
+            ):
+                st.session_state["processed_mosaic_event"] = mosaic_event["event_id"]
+                by_id = {item["id"]: item for item in items}
+                st.session_state["gallery"] = [by_id[ident] for ident in new_ids]
+                st.session_state["gallery_custom_order"] = True
+                st.session_state["gallery_export_bytes"] = None
+                st.rerun()
+            else:
+                st.warning("Некорректный порядок галереи. Изменения не применены.")
+    if st.session_state.get("gallery_custom_order"):
+        if st.button("Вернуть порядок по дате снимков", use_container_width=False):
+            st.session_state["gallery_custom_order"] = False
+            st.session_state["gallery"] = sorted_gallery(items)
+            st.session_state["gallery_export_bytes"] = None
+            st.rerun()
+
+
+
 with st.sidebar:
     st.title("🏔️ Анализ снежной обстановки")
     st.caption("Спутниковые снимки, граница снега и изотермы вдоль трека")
     st.subheader("1. Трек и точки")
-    # Import must run before widget keys are instantiated, so the restored
-    # satellite/date controls can be populated without Streamlit errors.
-    with st.expander("Восстановить проект из ZIP"):
-        archive_input = st.file_uploader(
-            "Архив исследования", type=["zip"], key="project_zip"
-        )
-        if st.button("Загрузить проект из ZIP", disabled=archive_input is None,
-                     use_container_width=True):
-            try:
-                apply_research_payload(import_project_zip(archive_input.getvalue()))
-                st.session_state.pop("active_token", None)
-                st.session_state.pop("last_saved_digest", None)
-                st.session_state["loaded_map_revision"] = "imported"
-                st.query_params.clear()
-                st.rerun()
-            except (SessionStorageError, ValueError, KeyError, TypeError) as exc:
-                st.error(f"Ошибка импорта проекта: {exc}")
     uploads = st.file_uploader(
         "Загрузить файлы KML или GPX",
         type=["kml", "gpx", "csv"],
@@ -865,6 +939,50 @@ with st.sidebar:
             ):
                 queue_gallery_uploads(current_token)
                 st.rerun()
+        with st.expander("Удалить проект полностью"):
+            st.warning(
+                "Это необратимое действие. Будут удалены данные исследования "
+                "из Supabase и все его фотографии в приватном Storage. "
+                "Ссылка перестанет работать. Любой, у кого есть ссылка, "
+                "может удалить проект, поскольку авторизации пока нет."
+            )
+            if st.session_state["gallery_upload_jobs"]:
+                st.info(
+                    "Перед удалением дождитесь завершения загрузки фотографий."
+                )
+            phrase = st.text_input(
+                "Для подтверждения напишите УДАЛИТЬ",
+                key="delete_project_phrase",
+                placeholder="УДАЛИТЬ",
+            )
+            if st.button(
+                "Удалить проект безвозвратно",
+                key="confirm_delete_project",
+                use_container_width=True,
+                disabled=(
+                    phrase.strip() != "УДАЛИТЬ"
+                    or bool(st.session_state["gallery_upload_jobs"])
+                    or gallery_store is None
+                ),
+            ):
+                try:
+                    with st.spinner("Удаляю фотографии и исследование из Supabase..."):
+                        removed_photos = delete_project(
+                            store, gallery_store, current_token
+                        )
+                    st.session_state.pop("active_token", None)
+                    st.session_state.pop("last_saved_digest", None)
+                    st.session_state["reset_after_delete"] = True
+                    st.query_params.clear()
+                    st.toast(
+                        f"Проект удалён из БД. Файлов Storage удалено: {removed_photos}."
+                    )
+                    st.rerun()
+                except SessionStorageError as exc:
+                    st.error(
+                        "Не удалось полностью удалить проект: " + str(exc)
+                        + " Запись исследования сохранена, повторите удаление."
+                    )
         try:
             st.link_button(
                 "Создать другое исследование",
@@ -907,6 +1025,7 @@ with st.sidebar:
     available_areas += [
         (item["id"], f"Галерея: {item['title'] or str(i+1)}", item["bounds"])
         for i, item in enumerate(gallery_items)
+        if item.get("bounds") is not None
     ]
     if available_areas and st.session_state["image_layers"]:
         area_choice = st.selectbox(
@@ -937,8 +1056,8 @@ with st.sidebar:
                     st.session_state["geotiff_bytes"] = export_geotiff(
                         source_spec, available_areas[area_choice][2], int(scale)
                     )
-                    st.session_state["geotiff_name"] = (
-                        source_spec["id"] + "_" + str(scale) + "m.tif"
+                    st.session_state["geotiff_name"] = geotiff_filename(
+                        source_spec, available_areas[area_choice][2], int(scale)
                     )
                 except Exception as exc:
                     st.error(f"Не удалось создать GeoTIFF: {exc}")

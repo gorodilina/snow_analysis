@@ -35,7 +35,11 @@ html,body{padding:0;margin:0;background:transparent;font:13px system-ui,-apple-s
 'use strict';
 let lastRevision='',selectedDragging='',suppressClick=false,eventCounter=0,pasteOnlyMode=false;
 const mosaic=document.getElementById('mosaic');
-function eventId(){return String(Date.now())+'-'+(++eventCounter);}
+function eventId(){
+  return (window.crypto && window.crypto.randomUUID)
+    ? window.crypto.randomUUID()
+    : String(Date.now())+'-'+(++eventCounter)+'-'+Math.random().toString(36).slice(2);
+}
 function emit(action,payload){
   window.parent.postMessage({
     isStreamlitMessage:true,type:'streamlit:setComponentValue',

@@ -19,14 +19,17 @@ from map_builder import map_config
 from map_component import research_map
 from project_layers import (
     migrate_legacy_selection, new_median_layer, new_scene_layer, normalize_layers,
+    contour_flags,
 )
 from project_archive import (
     build_project_zip, import_project_zip, safe_export_filename,
 )
 from gallery import (
     GalleryStorage, build_gallery_zip, build_gallery_pdf, new_gallery_item,
-    normalize_gallery, read_snapshot, suggested_gallery_title, validate_bounds,
+    normalize_gallery, normalize_annotations, read_snapshot, render_annotations,
+    suggested_gallery_title, validate_bounds,
 )
+from gallery_editor import edit_gallery_image
 from geo_export import export_geotiff, suggested_scale
 from session_store import SessionStorageError, SessionStore, valid_token
 
@@ -209,8 +212,14 @@ def gallery_image_bytes(item: dict) -> bytes:
     return data
 
 
-def collect_gallery_images() -> dict[str, bytes]:
-    return {item["id"]: gallery_image_bytes(item) for item in st.session_state["gallery"]}
+def collect_gallery_images(composite: bool = False) -> dict[str, bytes]:
+    return {
+        item["id"]: (
+            render_annotations(gallery_image_bytes(item), item)
+            if composite else gallery_image_bytes(item)
+        )
+        for item in st.session_state["gallery"]
+    }
 
 
 def sync_gallery_to_cloud(token: str) -> None:
@@ -299,7 +308,7 @@ def render_gallery_tab() -> None:
         for column, item in zip(columns, visible_items[offset:offset + 3]):
             with column:
                 try:
-                    st.image(gallery_image_bytes(item), use_container_width=True)
+                    st.image(render_annotations(gallery_image_bytes(item), item), use_container_width=True)
                 except SessionStorageError as exc:
                     st.warning(str(exc))
                 st.caption(item.get("title") or "Без названия")
@@ -313,9 +322,37 @@ def render_gallery_tab() -> None:
     with st.container(border=True):
         st.markdown("#### Выбранное изображение")
         try:
-            st.image(gallery_image_bytes(active), use_container_width=True)
+            st.image(render_annotations(gallery_image_bytes(active), active), use_container_width=True)
         except SessionStorageError as exc:
             st.warning(str(exc))
+        if st.toggle(
+            "✏️ Рисовать поверх фотографии (линии, стрелки, подписи)",
+            key="gallery_draw_" + active["id"],
+        ):
+            st.caption(
+                "Рисунки сохраняются отдельно от оригинала. "
+                "Можно отменить действие, очистить пометки или изменить их позже."
+            )
+            try:
+                editor_result = edit_gallery_image(
+                    gallery_image_bytes(active), active["format"],
+                    active["id"], active.get("annotations", []),
+                )
+                if (
+                    isinstance(editor_result, dict)
+                    and editor_result.get("action") == "save_annotations"
+                    and editor_result.get("item_id") == active["id"]
+                    and editor_result.get("event_id")
+                        != st.session_state.get("processed_annotation_event")
+                ):
+                    updated = normalize_annotations(editor_result.get("annotations"))
+                    st.session_state["processed_annotation_event"] = editor_result["event_id"]
+                    active["annotations"] = updated
+                    st.session_state["gallery_export_bytes"] = None
+                    st.session_state["project_backup_bytes"] = None
+                    st.rerun()
+            except (SessionStorageError, ValueError) as exc:
+                st.error(f"Не удалось сохранить пометки: {exc}")
         with st.form("edit_gallery_" + active["id"]):
             title = st.text_input(
                 "Название", value=active.get("title") or "", max_chars=150
@@ -353,7 +390,7 @@ def render_gallery_tab() -> None:
     )
     if st.button("Подготовить выгрузку", key="export_gallery_prepare"):
         try:
-            pictures = collect_gallery_images()
+            pictures = collect_gallery_images(composite=True)
             if export_mode.startswith("ZIP"):
                 output = build_gallery_zip(items, pictures)
                 ext, mime = "zip", "application/zip"
@@ -497,14 +534,15 @@ def add_image_layer(spec: dict, region: list[float]) -> None:
     st.session_state["runtime_tiles"][spec["id"]] = tile
 
 
+
 def current_tile_layers(region: list[float], is_connected: bool) -> list[dict]:
-    """Rebuild ephemeral URLs; overlays belong to each source image."""
+    """Load only the individually enabled outlines and isotherms per scene."""
     if not is_connected:
         return []
     catalogue = st.session_state["image_layers"]
     runtime = st.session_state["runtime_tiles"]
-    analysis_cache = st.session_state["analysis_tiles"]
-    contours_visible = bool(st.session_state.get("map_state", {}).get("analysis_visible", False))
+    cache = st.session_state["analysis_tiles"]
+    active = contour_flags(st.session_state.get("map_state", {}))
     tiles = []
     for spec in catalogue:
         ident = spec["id"]
@@ -515,24 +553,34 @@ def current_tile_layers(region: list[float], is_connected: bool) -> list[dict]:
                 st.warning(f"Снимок «{spec['name']}» пока недоступен: {exc}")
                 continue
         tiles.append(runtime[ident])
-        if contours_visible:
-            if ident not in analysis_cache:
-                try:
-                    overlays, warnings = analysis_overlay_tiles(spec, region)
-                    analysis_cache[ident] = overlays
-                    for warning in warnings:
-                        st.warning(f"{spec['name']}: {warning}")
-                except Exception as exc:
-                    st.warning(f"Контуры «{spec['name']}» пока недоступны: {exc}")
-                    analysis_cache[ident] = []
-            tiles.extend(analysis_cache[ident])
+        if not any(active.values()):
+            continue
+        if not isinstance(cache.get(ident), dict):
+            cache[ident] = {}
+        available = cache[ident]
+        missing = [key for key, visible in active.items()
+                   if visible and key not in available]
+        if missing:
+            try:
+                overlays, warnings = analysis_overlay_tiles(
+                    spec, region,
+                    include_snow="snow" in missing,
+                    iso_levels=[int(k.split("_")[1]) for k in missing if k.startswith("iso_")],
+                )
+                for layer in overlays:
+                    available[layer["analysis_key"]] = layer
+                for warning in warnings:
+                    st.warning(f"{spec['name']}: {warning}")
+            except Exception as exc:
+                st.warning(f"Контуры «{spec['name']}» временно недоступны: {exc}")
+        tiles.extend(available[k] for k in active if active[k] and k in available)
     valid_ids = {spec["id"] for spec in catalogue}
     for key in list(runtime):
         if key not in valid_ids:
             del runtime[key]
-    for key in list(analysis_cache):
+    for key in list(cache):
         if key not in valid_ids:
-            del analysis_cache[key]
+            del cache[key]
     return tiles
 
 
@@ -783,9 +831,8 @@ with st.sidebar:
         st.session_state["runtime_tiles"] = {}
         st.session_state["analysis_tiles"] = {}
         st.rerun()
-    st.caption("Для каждого снимка отдельно рассчитаны граница снега и изотермы. "
-               "Все контуры включаются общим переключателем и повторяют прозрачность "
-               "соответствующего спутникового слоя.")
+    st.caption("Граница снега и изотермы −5/0/+5/+10 °C включаются отдельно, "
+               "имеют собственные цвета и повторяют прозрачность своего снимка.")
 
 if connection_error:
     with st.expander("Настройка доступа к Earth Engine"):
@@ -839,8 +886,7 @@ with tab_map:
             st.session_state["map_state"] = incoming_state
         changed_analysis = (
             isinstance(incoming_state, dict)
-            and bool(previous_state.get("analysis_visible", False))
-                != bool(incoming_state.get("analysis_visible", False))
+            and contour_flags(previous_state) != contour_flags(incoming_state)
         )
         action = map_event.get("action")
         event_id = map_event.get("event_id")
@@ -889,8 +935,7 @@ with tab_map:
             except (SessionStorageError, ValueError, TypeError) as exc:
                 st.error(f"Не удалось подготовить снимок для галереи: {exc}")
         elif changed_analysis:
-            # Server must request missing GEE contour URLs when all contours are
-            # switched on; switching off also drops them from the map payload.
+            # Rebuild the map tile payload only when an individual contour flag changes.
             st.rerun()
     
     for warning in st.session_state.get("warnings", []):
@@ -900,7 +945,7 @@ with tab_map:
             "Каждый снимок отображается без облачной маски. "
             "Для каждого снимка граница снега рассчитывается из облачно-маскированных "
             "данных NDSI (может включать ледники), а изотермы ERA5-Land — модельная оценка. "
-            "Оба вида контуров включаются и скрываются одновременно."
+            "Граница снега и каждая изотерма включаются независимо в «Слоях карты»."
         )
     with pending_slot.container():
         render_pending_photo_form()

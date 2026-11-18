@@ -98,6 +98,8 @@ def test_capture_dom_ignores_blue_rectangle_and_uses_hires():
     html = (Path(__file__).resolve().parents[1] /
             "map_component/index.html").read_text(encoding="utf-8")
     assert "className:'capture-selection-overlay'" in html
+    assert "selectionRenderer=L.svg({pane:'selectionPane'})" in html
+    assert "renderer:selectionRenderer" in html
     assert "onclone:clone" in html
     assert "querySelectorAll('.capture-selection-overlay')" in html
     assert "scale:2.8" in html

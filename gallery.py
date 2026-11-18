@@ -244,7 +244,7 @@ def photo_layer_date(item: dict) -> str:
     except ValueError:
         pass
     # Old images only saved the source date as part of the display title.
-    match = re.search(r"(\\d{1,2})\\.(\\d{2})\\.(\\d{2,4})", str(item.get("title", "")))
+    match = re.search(r"(\d{1,2})\.(\d{2})\.(\d{2,4})", str(item.get("title", "")))
     if match:
         day, month, year = map(int, match.groups())
         if year < 100:
@@ -413,9 +413,9 @@ def build_gallery_pdf(
     if project_notes.strip():
         story.append(Paragraph(escape(str(name)[:150]), title_style))
         story.append(Paragraph("Заметки об исследовании", title_style))
-        for part in project_notes.strip().split("\\n\\n"):
+        for part in project_notes.strip().split("\n\n"):
             story.append(Paragraph(
-                escape(part).replace("\\n", "<br/>"), note_style
+                escape(part).replace("\n", "<br/>"), note_style
             ))
         story.append(PageBreak())
     for index, item in enumerate(items, 1):

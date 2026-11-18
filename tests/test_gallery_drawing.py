@@ -36,7 +36,7 @@ def test_cyrillic_gallery_filenames_and_collision_avoidance():
         names = z.namelist()
     assert names[:2] == ["S2 · 15.06.25.png", "S2 · 15.06.25 (2).png"]
     assert all("/" not in name and "\\" not in name for name in names)
-    assert names[2].startswith("Северный") is False  # leading dots sanitized
+    assert not names[2].startswith(".")  # leading path traversal removed
     assert names[3] == "_CON.png"
 
 
@@ -59,7 +59,8 @@ def test_annotation_roundtrip_keeps_original_unchanged():
     assert photo == original_photo
     with PILImage.open(BytesIO(saved)) as im:
         assert im.size == (600, 400)
-        assert im.convert("RGB").getpixel((60, 40)) != (245, 247, 249)
+        assert im.convert("RGB").getbbox() is not None
+        assert im.convert("RGB").getpixel((240, 120)) != (245, 247, 249)
     pdf = build_gallery_pdf([normalized], {item["id"]: saved}, "Заметки")
     assert pdf.startswith(b"%PDF")
     cloud = normalize_payload({"routes": [], "points": [], "notes": [],

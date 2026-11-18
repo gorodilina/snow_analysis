@@ -37,10 +37,10 @@ def geotiff_filename(spec: dict, bounds: list[float], scale: int) -> str:
     if spec.get("kind") == "median":
         start = date.fromisoformat(spec["start"])
         end = start + timedelta(days=int(spec["length"]) - 1)
-        scene = f"median_{start:%Y-%m-%d}_to_{end:%Y-%m-%d}"
+        scene = f"median_{start:%d.%m.%Y}_to_{end:%d.%m.%Y}"
     else:
         day = date.fromisoformat(spec["day"])
-        scene = day.isoformat()
+        scene = day.strftime("%d.%m.%Y")
         time = str(spec.get("time") or "").strip().replace(":", "-")
         if time and len(time) == 5 and time.replace("-", "").isdigit():
             scene += "_" + time
